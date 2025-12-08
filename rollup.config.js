@@ -3,7 +3,8 @@ import resolve from "@rollup/plugin-node-resolve";
 import commonjs from "@rollup/plugin-commonjs";
 import terser from "@rollup/plugin-terser";
 
-const external = ["ws"];
+// Node.js external dependencies
+const nodeExternal = ["ws"];
 
 export default [
   // ESM build (Node.js)
@@ -14,7 +15,7 @@ export default [
       format: "esm",
       sourcemap: true,
     },
-    external,
+    external: nodeExternal,
     plugins: [
       typescript({ tsconfig: "./tsconfig.json" }),
       resolve(),
@@ -29,7 +30,7 @@ export default [
       format: "cjs",
       sourcemap: true,
     },
-    external,
+    external: nodeExternal,
     plugins: [
       typescript({ tsconfig: "./tsconfig.json" }),
       resolve(),
@@ -37,6 +38,7 @@ export default [
     ],
   },
   // Browser build (bundled, minified)
+  // Also works for React Native (uses native WebSocket)
   {
     input: "src/browser.ts",
     output: {
@@ -44,6 +46,7 @@ export default [
       format: "esm",
       sourcemap: true,
     },
+    // No external - bundle everything for browser
     plugins: [
       typescript({ tsconfig: "./tsconfig.json" }),
       resolve({ browser: true }),

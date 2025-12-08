@@ -1,10 +1,22 @@
 /**
  * NoLag SDK
- * Real-time messaging for browser and Node.js
+ * Real-time messaging for Node.js
  */
 
-export { NoLag, NoLagSocket } from "./client";
-export * from "./types";
+import { NoLag as NoLagClient } from "./client";
+import { createWebSocket } from "./websocket/node";
+import type { NoLagOptions } from "./types";
 
-// Re-export NoLag as default
-export { NoLag as default } from "./client";
+export { NoLagSocket } from "./client";
+export * from "./types";
+export type { WebSocketFactory, IUnifiedWebSocket } from "./websocket/types";
+
+/**
+ * Create a NoLag client for Node.js
+ */
+export const NoLag = (token: string, options?: NoLagOptions): NoLagClient => {
+  return new NoLagClient(createWebSocket, token, options);
+};
+
+// Re-export the factory as default
+export default NoLag;

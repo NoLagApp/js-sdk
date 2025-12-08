@@ -13,7 +13,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
-import { NoLag } from "../../src/client";
+import { NoLag } from "../../src/index";
 
 const TEST_URL = process.env.NOLAG_TEST_URL || "ws://localhost:8080/ws";
 const TEST_TOKEN = process.env.NOLAG_TEST_TOKEN;
@@ -46,10 +46,10 @@ function sleep(ms: number): Promise<void> {
 }
 
 describe.skipIf(!TEST_TOKEN)("NoLag SDK E2E with Kraken-v2", () => {
-  let client: NoLag;
+  let client: ReturnType<typeof NoLag>;
 
   beforeEach(() => {
-    client = new NoLag(TEST_TOKEN!, {
+    client = NoLag(TEST_TOKEN!, {
       url: TEST_URL,
       debug: true,
       reconnect: false,
@@ -74,7 +74,7 @@ describe.skipIf(!TEST_TOKEN)("NoLag SDK E2E with Kraken-v2", () => {
     });
 
     it("should fail with invalid token", async () => {
-      const badClient = new NoLag("invalid_token", {
+      const badClient = NoLag("invalid_token", {
         url: TEST_URL,
         reconnect: false,
       });
@@ -259,7 +259,7 @@ describe.skipIf(!TEST_TOKEN)("NoLag SDK E2E with Kraken-v2", () => {
 
   describe("Heartbeat", () => {
     it("should send and receive heartbeat", async () => {
-      const heartbeatClient = new NoLag(TEST_TOKEN!, {
+      const heartbeatClient = NoLag(TEST_TOKEN!, {
         url: TEST_URL,
         debug: true,
         reconnect: false,
@@ -279,7 +279,7 @@ describe.skipIf(!TEST_TOKEN)("NoLag SDK E2E with Kraken-v2", () => {
     });
 
     it("should not send heartbeat when disabled", async () => {
-      const noHeartbeatClient = new NoLag(TEST_TOKEN!, {
+      const noHeartbeatClient = NoLag(TEST_TOKEN!, {
         url: TEST_URL,
         debug: true,
         reconnect: false,
@@ -317,7 +317,7 @@ describe.skipIf(!TEST_TOKEN)("NoLag SDK E2E with Kraken-v2", () => {
     });
 
     it("should handle subscribe before connect", () => {
-      const unconnectedClient = new NoLag(TEST_TOKEN!, {
+      const unconnectedClient = NoLag(TEST_TOKEN!, {
         url: TEST_URL,
         reconnect: false,
       });
@@ -331,7 +331,7 @@ describe.skipIf(!TEST_TOKEN)("NoLag SDK E2E with Kraken-v2", () => {
     });
 
     it("should handle emit before connect", () => {
-      const unconnectedClient = new NoLag(TEST_TOKEN!, {
+      const unconnectedClient = NoLag(TEST_TOKEN!, {
         url: TEST_URL,
         reconnect: false,
       });
@@ -351,14 +351,14 @@ describe.skipIf(!TEST_TOKEN || !TEST_TOKEN_2)("Multi-Client Messaging", () => {
   let client2: NoLag;
 
   beforeEach(async () => {
-    client1 = new NoLag(TEST_TOKEN!, {
+    client1 = NoLag(TEST_TOKEN!, {
       url: TEST_URL,
       debug: true,
       reconnect: false,
       heartbeatInterval: 0,
     });
 
-    client2 = new NoLag(TEST_TOKEN_2!, {
+    client2 = NoLag(TEST_TOKEN_2!, {
       url: TEST_URL,
       debug: true,
       reconnect: false,
@@ -424,7 +424,7 @@ describe.skipIf(!TEST_TOKEN || !TEST_TOKEN_2)("Multi-Client Messaging", () => {
 
 describe.skipIf(!TEST_TOKEN)("Load Balancing", () => {
   it("should subscribe with load balancing enabled", async () => {
-    const client = new NoLag(TEST_TOKEN!, {
+    const client = NoLag(TEST_TOKEN!, {
       url: TEST_URL,
       debug: true,
       reconnect: false,
@@ -446,7 +446,7 @@ describe.skipIf(!TEST_TOKEN)("Load Balancing", () => {
   });
 
   it("should override load balance per subscription", async () => {
-    const client = new NoLag(TEST_TOKEN!, {
+    const client = NoLag(TEST_TOKEN!, {
       url: TEST_URL,
       debug: true,
       reconnect: false,

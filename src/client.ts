@@ -28,6 +28,7 @@ import {
   AppContext,
   RoomContext,
 } from "./types";
+import { IUnifiedWebSocket, WebSocketFactory, WS_READY_STATE } from "./websocket/types";
 
 const DEFAULT_URL = "wss://broker.nolag.app/ws";
 const DEFAULT_RECONNECT_INTERVAL = 5000;
@@ -84,7 +85,8 @@ interface InternalOptions extends Required<Omit<NoLagOptions, 'loadBalanceGroup'
  */
 export class NoLag {
   private _options: InternalOptions;
-  private _ws: WebSocket | null = null;
+  private _createWebSocket: WebSocketFactory;
+  private _ws: IUnifiedWebSocket | null = null;
   private _status: ConnectionStatus = "disconnected";
   private _reconnectAttempts = 0;
   private _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -102,7 +104,12 @@ export class NoLag {
   // Event handlers (local - for routing messages to callbacks)
   private _eventHandlers: Map<string, Set<EventHandler>> = new Map();
 
-  constructor(token: string, options?: NoLagOptions) {
+  constructor(
+    createWebSocket: WebSocketFactory,
+    token: string,
+    options?: NoLagOptions
+  ) {
+    this._createWebSocket = createWebSocket;
     this._options = {
       token,
       url: options?.url ?? DEFAULT_URL,
@@ -193,10 +200,9 @@ export class NoLag {
       this._log("Connecting to", this._options.url);
 
       try {
-        this._ws = new WebSocket(this._options.url);
-        this._ws.binaryType = "arraybuffer";
+        this._ws = this._createWebSocket(this._options.url);
 
-        this._ws.onopen = () => {
+        this._ws.onOpen = () => {
           this._log("WebSocket opened, authenticating...");
           this._authenticate()
             .then((restoredSubscriptions) => {
@@ -227,11 +233,11 @@ export class NoLag {
             });
         };
 
-        this._ws.onmessage = (event) => {
-          this._handleMessage(event.data);
+        this._ws.onMessage = (data: ArrayBuffer) => {
+          this._handleMessage(data);
         };
 
-        this._ws.onclose = (event) => {
+        this._ws.onClose = (event: any) => {
           const wasConnected = this._status === "connected";
           this._status = "disconnected";
           this._ws = null;
@@ -239,7 +245,7 @@ export class NoLag {
           this._stopHeartbeat();
 
           if (wasConnected) {
-            this._emitEvent("disconnect", event.reason || "Connection closed");
+            this._emitEvent("disconnect", event?.reason || "Connection closed");
           }
 
           // Attempt reconnection
@@ -248,7 +254,7 @@ export class NoLag {
           }
         };
 
-        this._ws.onerror = (event) => {
+        this._ws.onError = (event) => {
           this._log("WebSocket error:", event);
           this._emitEvent("error", new Error("WebSocket error"));
 
@@ -719,7 +725,7 @@ export class NoLag {
     this._stopHeartbeat();
 
     this._heartbeatTimer = setInterval(() => {
-      if (this._ws && this._ws.readyState === WebSocket.OPEN) {
+      if (this._ws && this._ws.readyState === WS_READY_STATE.OPEN) {
         // Send empty binary packet as heartbeat
         this._ws.send(new ArrayBuffer(0));
         this._log("Heartbeat ping sent");
