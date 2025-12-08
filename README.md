@@ -1,154 +1,167 @@
-# NoLag SDK v2
+# @nolag/js
 
-Real-time messaging SDK for browser and Node.js. Socket.IO-style API for the NoLag platform.
+Real-time messaging SDK for browser and Node.js. Connects to Kraken Proxy via WebSocket with MessagePack.
 
 ## Installation
 
 ```bash
-npm install @nolag/sdk
+npm install @nolag/js
 ```
 
 ## Quick Start
 
 ```typescript
-import { nolag } from "@nolag/sdk";
+import { NoLag } from "@nolag/js";
 
-const socket = nolag("your_actor_token");
+const client = new NoLag({
+  token: "your_actor_access_token",
+});
 
-socket.on("connect", () => {
+client.on("connect", () => {
   console.log("Connected!");
 
   // Set your presence
-  socket.setPresence({ username: "Alice", status: "online" });
+  client.setPresence({ username: "Alice", status: "online" });
 
   // Subscribe to topics
-  socket.subscribe("myapp.lobby.messages");
+  client.subscribe("chat/lobby/messages");
 });
 
-socket.on("myapp.lobby.messages", (data) => {
+client.on("chat/lobby/messages", (data) => {
   console.log("Received:", data);
 });
 
 // Publish messages
-socket.emit("myapp.lobby.messages", { text: "Hello world!" });
+client.emit("chat/lobby/messages", { text: "Hello world!" });
 
 // Connect
-await socket.connect();
+await client.connect();
 ```
+
+## Features
+
+- **WebSocket + MessagePack** - Efficient binary protocol
+- **Auto-reconnect** - Automatic reconnection with exponential backoff
+- **Subscription persistence** - Automatic re-subscribe on reconnect
+- **Presence** - Project-level presence tracking
+- **TypeScript** - Full type definitions included
 
 ## API Reference
 
-### Creating a Connection
+### Creating a Client
 
 ```typescript
-import { nolag } from "@nolag/sdk";
+import { NoLag } from "@nolag/js";
 
-const socket = nolag(token, options);
+const client = new NoLag(options);
 ```
-
-**Parameters:**
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `token` | `string` | Actor access token from NoLag API |
-| `options` | `NoLagOptions` | Connection options (optional) |
 
 **Options:**
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `url` | `string` | `wss://broker.nolag.app/ws` | WebSocket server URL |
+| `token` | `string` | Required | Actor access token |
+| `url` | `string` | `wss://broker.nolag.app/ws` | Kraken Proxy URL |
 | `reconnect` | `boolean` | `true` | Auto-reconnect on disconnect |
-| `reconnectInterval` | `number` | `5000` | Reconnect delay in ms |
-| `disconnectOnHidden` | `boolean` | `false` | Disconnect when browser tab hidden |
+| `reconnectInterval` | `number` | `5000` | Initial reconnect delay (ms) |
+| `disconnectOnHidden` | `boolean` | `false` | Disconnect when tab hidden |
 | `debug` | `boolean` | `false` | Enable debug logging |
+| `qos` | `0 \| 1 \| 2` | `1` | Default QoS level |
 
-### Connection Methods
-
-#### `socket.connect()`
-
-Connect to NoLag. Returns a Promise that resolves when connected.
+### Connection
 
 ```typescript
-await socket.connect();
+// Connect
+await client.connect();
+
+// Disconnect
+client.disconnect();
+
+// Check status
+console.log(client.connected);  // boolean
+console.log(client.status);     // "disconnected" | "connecting" | "connected" | "reconnecting"
 ```
-
-#### `socket.disconnect()`
-
-Disconnect from NoLag.
-
-```typescript
-socket.disconnect();
-```
-
-### Connection Properties
-
-| Property | Type | Description |
-|----------|------|-------------|
-| `socket.connected` | `boolean` | Connection status |
-| `socket.status` | `ConnectionStatus` | `"disconnected"`, `"connecting"`, `"connected"`, `"reconnecting"` |
-| `socket.actorId` | `string \| null` | Your actor token ID |
-| `socket.actorType` | `ActorType \| null` | `"device"`, `"user"`, or `"server"` |
-| `socket.projectId` | `string \| null` | Project ID |
-| `socket.subscriptions` | `string[]` | List of subscribed topics |
 
 ### Connection Events
 
 ```typescript
-socket.on("connect", () => {
+client.on("connect", () => {
   console.log("Connected!");
 });
 
-socket.on("disconnect", (reason) => {
+client.on("disconnect", (reason) => {
   console.log("Disconnected:", reason);
 });
 
-socket.on("reconnect", () => {
-  console.log("Reconnected!");
+client.on("reconnect", () => {
+  console.log("Reconnecting...");
 });
 
-socket.on("error", (error) => {
+client.on("error", (error) => {
   console.error("Error:", error);
 });
 ```
 
 ---
 
+## Reconnection Behavior
+
+The SDK automatically handles reconnection:
+
+1. **Connection lost** - WebSocket closes unexpectedly
+2. **Exponential backoff** - Waits 5s, 7.5s, 11.25s... (max 30s)
+3. **Re-authenticate** - Sends auth token to Kraken Proxy
+4. **Re-subscribe** - Automatically re-subscribes to all topics
+5. **Restore presence** - Re-sends presence data if set
+
+```typescript
+// Subscriptions are tracked internally
+client.subscribe("chat/lobby/messages");
+client.subscribe("notifications");
+
+// After reconnect, both topics are automatically re-subscribed
+client.on("reconnect", () => {
+  console.log("Reconnecting, will restore:", client.subscriptions);
+  // ["chat/lobby/messages", "notifications"]
+});
+```
+
+**Max reconnect attempts:** 10 (then stops trying)
+
+---
+
 ## Topics
 
-Topics use a hierarchical pattern: `{app}.{room}.{topic}`
+Topics use path-style naming: `app/room/topic`
 
 ### Subscribing
 
 ```typescript
 // Subscribe to a topic
-socket.subscribe("myapp.lobby.messages");
+client.subscribe("chat/lobby/messages");
 
 // With callback
-socket.subscribe("myapp.lobby.messages", (error) => {
-  if (error) {
-    console.error("Subscribe failed:", error);
-  }
+client.subscribe("chat/lobby/messages", (error) => {
+  if (error) console.error("Subscribe failed:", error);
 });
 ```
 
 ### Unsubscribing
 
 ```typescript
-socket.unsubscribe("myapp.lobby.messages");
+client.unsubscribe("chat/lobby/messages");
 ```
 
 ### Receiving Messages
 
 ```typescript
 // Listen to specific topic
-socket.on("myapp.lobby.messages", (data, meta) => {
+client.on("chat/lobby/messages", (data, meta) => {
   console.log("Data:", data);
-  console.log("From:", meta.from); // sender actorId
 });
 
 // Listen to all topics (wildcard)
-socket.onAny((topic, data, meta) => {
+client.onAny((topic, data, meta) => {
   console.log(`[${topic}]`, data);
 });
 ```
@@ -157,20 +170,14 @@ socket.onAny((topic, data, meta) => {
 
 ```typescript
 // Simple emit
-socket.emit("myapp.lobby.messages", { text: "Hello!" });
+client.emit("chat/lobby/messages", { text: "Hello!" });
 
-// With acknowledgment callback
-socket.emit("myapp.lobby.messages", { text: "Hello!" }, (error) => {
-  if (error) {
-    console.error("Emit failed:", error);
-  } else {
-    console.log("Message sent!");
-  }
-});
+// With QoS
+client.emit("chat/lobby/messages", { text: "Hello!" }, { qos: 2 });
 
-// With options
-socket.emit("myapp.lobby.messages", { text: "Hello!" }, {
-  noEcho: true  // Don't receive your own message
+// With callback
+client.emit("chat/lobby/messages", { text: "Hello!" }, (error) => {
+  if (error) console.error("Emit failed:", error);
 });
 ```
 
@@ -183,17 +190,11 @@ Presence is project-level - when you're online, you're visible to all actors in 
 ### Setting Presence
 
 ```typescript
-// Set your presence data
-socket.setPresence({
+// Set your presence data (persists across reconnects)
+client.setPresence({
   username: "Alice",
   status: "online",
   avatar: "/img/alice.png"
-});
-
-// Update presence
-socket.setPresence({
-  username: "Alice",
-  status: "away"
 });
 ```
 
@@ -201,19 +202,17 @@ socket.setPresence({
 
 ```typescript
 // Someone joined
-socket.on("presence:join", (actor) => {
+client.on("presence:join", (actor) => {
   console.log(`${actor.presence.username} is online`);
-  console.log("Actor ID:", actor.actorTokenId);
-  console.log("Actor type:", actor.actorType);
 });
 
 // Someone left
-socket.on("presence:leave", (actor) => {
+client.on("presence:leave", (actor) => {
   console.log(`${actor.actorTokenId} went offline`);
 });
 
 // Someone updated their presence
-socket.on("presence:update", (actor) => {
+client.on("presence:update", (actor) => {
   console.log(`${actor.presence.username} is now ${actor.presence.status}`);
 });
 ```
@@ -221,24 +220,35 @@ socket.on("presence:update", (actor) => {
 ### Getting Presence
 
 ```typescript
-// Get all online actors
-const everyone = socket.getPresence();
-// Returns: ActorPresence[]
+// Get all online actors (local cache)
+const everyone = client.getPresence();
 
 // Get specific actor
-const alice = socket.getPresence("actor_token_id_123");
-// Returns: ActorPresence | undefined
+const alice = client.getPresence("actor_token_id_123");
+
+// Fetch from server (async)
+const presenceList = await client.fetchPresence();
 ```
 
-**ActorPresence type:**
+---
+
+## QoS Levels
+
+| Level | Name | Description |
+|-------|------|-------------|
+| 0 | At most once | Fire and forget, no guarantee |
+| 1 | At least once | Guaranteed delivery, may duplicate |
+| 2 | Exactly once | Guaranteed single delivery |
 
 ```typescript
-interface ActorPresence {
-  actorTokenId: string;
-  actorType: "device" | "user" | "server";
-  presence: Record<string, unknown>;  // Your custom data
-  joinedAt?: number;
-}
+// Set default QoS
+const client = new NoLag({
+  token: "...",
+  qos: 1  // Default for all messages
+});
+
+// Override per message
+client.emit("important/data", data, { qos: 2 });
 ```
 
 ---
@@ -246,58 +256,55 @@ interface ActorPresence {
 ## Full Example
 
 ```typescript
-import { nolag } from "@nolag/sdk";
+import { NoLag } from "@nolag/js";
 
 async function main() {
-  // Create socket with actor token
-  const socket = nolag("act_xxxxxxxxxxxx", {
+  const client = new NoLag({
+    token: "your_access_token",
     debug: true,
-    reconnect: true,
   });
 
   // Connection events
-  socket.on("connect", () => {
-    console.log("✓ Connected as:", socket.actorId);
+  client.on("connect", () => {
+    console.log("Connected as:", client.actorId);
 
     // Set presence
-    socket.setPresence({
+    client.setPresence({
       username: "Alice",
       status: "online",
     });
 
     // Subscribe to chat
-    socket.subscribe("chatapp.general.messages");
+    client.subscribe("chat/general/messages");
   });
 
-  socket.on("disconnect", (reason) => {
-    console.log("✗ Disconnected:", reason);
+  client.on("disconnect", (reason) => {
+    console.log("Disconnected:", reason);
   });
 
-  socket.on("error", (err) => {
-    console.error("Error:", err);
+  client.on("reconnect", () => {
+    console.log("Reconnecting...");
   });
 
   // Presence events
-  socket.on("presence:join", (actor) => {
-    console.log(`→ ${actor.presence.username} joined`);
+  client.on("presence:join", (actor) => {
+    console.log(`${actor.presence.username} joined`);
   });
 
-  socket.on("presence:leave", (actor) => {
-    console.log(`← ${actor.actorTokenId} left`);
+  client.on("presence:leave", (actor) => {
+    console.log(`${actor.actorTokenId} left`);
   });
 
   // Message handler
-  socket.on("chatapp.general.messages", (data, meta) => {
-    const sender = socket.getPresence(meta.from);
-    const name = sender?.presence?.username || "Unknown";
-    console.log(`[${name}]: ${data.text}`);
+  client.on("chat/general/messages", (data, meta) => {
+    console.log(`Message: ${data.text}`);
   });
 
   // Connect
-  await socket.connect();
+  await client.connect();
 
   // Send a message
-  socket.emit("chatapp.general.messages", {
+  client.emit("chat/general/messages", {
     text: "Hello everyone!",
   });
 }
@@ -311,15 +318,17 @@ main().catch(console.error);
 
 ```html
 <script type="module">
-  import { nolag } from "https://unpkg.com/@nolag/sdk/dist/browser.js";
+  import { NoLag } from "https://unpkg.com/@nolag/js/dist/browser.js";
 
-  const socket = nolag("your_token");
+  const client = new NoLag({
+    token: "your_token"
+  });
 
-  socket.on("connect", () => {
+  client.on("connect", () => {
     console.log("Connected!");
   });
 
-  socket.connect();
+  client.connect();
 </script>
 ```
 
@@ -327,18 +336,18 @@ main().catch(console.error);
 
 ## TypeScript
 
-Full TypeScript support included. Import types as needed:
+Full TypeScript support included:
 
 ```typescript
 import {
-  nolag,
-  NoLagSocket,
+  NoLag,
   NoLagOptions,
   ActorPresence,
   ConnectionStatus,
   ActorType,
   MessageMeta,
-} from "@nolag/sdk";
+  QoS,
+} from "@nolag/js";
 ```
 
 ---

@@ -1,8 +1,12 @@
 /**
  * NoLag Client
- * Main SDK class - Socket.IO style API with MessagePack protocol
+ * WebSocket client for Kraken Proxy with automatic reconnection
+ *
+ * Subscriptions are persisted server-side - no local tracking needed.
+ * On reconnect, the server automatically restores all subscriptions.
  */
 
+import { encode as msgpackEncode, decode as msgpackDecode } from "@msgpack/msgpack";
 import {
   NoLagOptions,
   ConnectionStatus,
@@ -11,6 +15,8 @@ import {
   ActorPresence,
   MessageMeta,
   EmitOptions,
+  SubscribeOptions,
+  RestoredSubscription,
   ConnectHandler,
   DisconnectHandler,
   ReconnectHandler,
@@ -18,30 +24,15 @@ import {
   PresenceHandler,
   MessageHandler,
   AckCallback,
+  QoS,
+  AppContext,
+  RoomContext,
 } from "./types";
-import { createWebSocket, UnifiedWebSocket } from "./websocket";
-import {
-  decode,
-  createAuthMessage,
-  createSubscribeMessage,
-  createUnsubscribeMessage,
-  createTopicMessage,
-  createPresenceMessage,
-  isInitMessage,
-  isAckMessage,
-  isErrorMessage,
-  isAlertMessage,
-  isTopicMessage,
-  isPresenceEventMessage,
-  Message,
-  AckMessage,
-  TopicMessage,
-  PresenceEventMessage,
-} from "./transport";
 
-const DEFAULT_URL = "wss://broker.nolag.app/v2/ws";
-const HEARTBEAT_INTERVAL = 20000;
+const DEFAULT_URL = "wss://broker.nolag.app/ws";
 const DEFAULT_RECONNECT_INTERVAL = 5000;
+const DEFAULT_MAX_RECONNECT_ATTEMPTS = 10;
+const DEFAULT_HEARTBEAT_INTERVAL = 30000;
 
 type EventHandler =
   | ConnectHandler
@@ -51,18 +42,55 @@ type EventHandler =
   | PresenceHandler
   | MessageHandler;
 
-/**
- * NoLag Socket Client
- */
-export class NoLagSocket {
-  private _token: string;
-  private _options: Required<NoLagOptions>;
-  private _ws: UnifiedWebSocket | null = null;
-  private _status: ConnectionStatus = "disconnected";
-  private _heartbeatTimer: ReturnType<typeof setInterval> | null = null;
-  private _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+// Internal options type with token included
+interface InternalOptions extends Required<Omit<NoLagOptions, 'loadBalanceGroup' | 'actorTokenId' | 'heartbeatInterval'>> {
+  token: string;
+  actorTokenId?: string;
+  loadBalanceGroup?: string;
+  maxReconnectAttempts: number;
+  heartbeatInterval: number;
+}
 
-  // Actor info (populated after connect)
+/**
+ * NoLag Client
+ *
+ * A Socket.IO-style API for real-time messaging via Kraken Proxy.
+ *
+ * Subscriptions are automatically restored on reconnect by the server.
+ *
+ * @example
+ * ```typescript
+ * // Simple connection
+ * const client = new NoLag('your_access_token');
+ * await client.connect();
+ *
+ * // Fluent API (recommended)
+ * const room = client.setApp('chat').setRoom('general');
+ * room.subscribe('messages');
+ * room.on('messages', (data) => console.log(data));
+ * room.emit('messages', { text: 'Hello!' });
+ *
+ * // Direct API (full topic paths)
+ * client.subscribe('chat.general.messages');
+ * client.on('chat.general.messages', (data) => console.log(data));
+ * client.emit('chat.general.messages', { text: 'Hello!' });
+ *
+ * // Worker with load balancing
+ * const worker = new NoLag('worker_token', {
+ *   loadBalance: true,
+ *   loadBalanceGroup: 'worker-pool-1'
+ * });
+ * ```
+ */
+export class NoLag {
+  private _options: InternalOptions;
+  private _ws: WebSocket | null = null;
+  private _status: ConnectionStatus = "disconnected";
+  private _reconnectAttempts = 0;
+  private _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private _heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+
+  // Actor info (populated after auth)
   private _actorTokenId: string | null = null;
   private _projectId: string | null = null;
   private _actorType: ActorType | null = null;
@@ -71,24 +99,23 @@ export class NoLagSocket {
   private _presence: PresenceData | null = null;
   private _presenceMap: Map<string, ActorPresence> = new Map();
 
-  // Event handlers
+  // Event handlers (local - for routing messages to callbacks)
   private _eventHandlers: Map<string, Set<EventHandler>> = new Map();
 
-  // Subscribed topics
-  private _subscriptions: Set<string> = new Set();
-
-  // Pending ack callbacks
-  private _ackCallbacks: Map<string, AckCallback> = new Map();
-  private _ackCounter = 0;
-
-  constructor(token: string, options: NoLagOptions = {}) {
-    this._token = token;
+  constructor(token: string, options?: NoLagOptions) {
     this._options = {
-      url: options.url ?? DEFAULT_URL,
-      reconnect: options.reconnect ?? true,
-      reconnectInterval: options.reconnectInterval ?? DEFAULT_RECONNECT_INTERVAL,
-      disconnectOnHidden: options.disconnectOnHidden ?? false,
-      debug: options.debug ?? false,
+      token,
+      url: options?.url ?? DEFAULT_URL,
+      actorTokenId: options?.actorTokenId,
+      reconnect: options?.reconnect ?? true,
+      reconnectInterval: options?.reconnectInterval ?? DEFAULT_RECONNECT_INTERVAL,
+      maxReconnectAttempts: DEFAULT_MAX_RECONNECT_ATTEMPTS,
+      disconnectOnHidden: options?.disconnectOnHidden ?? false,
+      debug: options?.debug ?? false,
+      qos: options?.qos ?? 1,
+      loadBalance: options?.loadBalance ?? false,
+      loadBalanceGroup: options?.loadBalanceGroup,
+      heartbeatInterval: options?.heartbeatInterval ?? DEFAULT_HEARTBEAT_INTERVAL,
     };
 
     // Set up visibility change handler for browser
@@ -96,8 +123,8 @@ export class NoLagSocket {
       document.addEventListener("visibilitychange", () => {
         if (document.visibilityState === "hidden") {
           this.disconnect();
-        } else if (document.visibilityState === "visible") {
-          this._reconnect();
+        } else if (document.visibilityState === "visible" && this._status === "disconnected") {
+          this.connect().catch(console.error);
         }
       });
     }
@@ -125,47 +152,115 @@ export class NoLagSocket {
     return this._projectId;
   }
 
-  get subscriptions(): string[] {
-    return Array.from(this._subscriptions);
+  get loadBalanced(): boolean {
+    return this._options.loadBalance;
+  }
+
+  get loadBalanceGroup(): string | undefined {
+    return this._options.loadBalanceGroup;
   }
 
   // ============ Connection ============
 
   /**
    * Connect to NoLag
+   *
+   * On reconnect, the server automatically restores all previous subscriptions.
    */
-  async connect(): Promise<void> {
-    if (this._status === "connected" || this._status === "connecting") {
-      return;
-    }
+  connect(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      if (this._status === "connected") {
+        resolve();
+        return;
+      }
 
-    this._status = "connecting";
-    this._log("Connecting to", this._options.url);
+      if (this._status === "connecting") {
+        // Wait for existing connection attempt
+        const checkConnection = () => {
+          if (this._status === "connected") {
+            resolve();
+          } else if (this._status === "disconnected") {
+            reject(new Error("Connection failed"));
+          } else {
+            setTimeout(checkConnection, 100);
+          }
+        };
+        checkConnection();
+        return;
+      }
 
-    try {
-      this._ws = await createWebSocket(this._options.url);
+      this._status = "connecting";
+      this._log("Connecting to", this._options.url);
 
-      this._ws.onOpen(() => {
-        this._log("WebSocket opened, waiting for init...");
-      });
+      try {
+        this._ws = new WebSocket(this._options.url);
+        this._ws.binaryType = "arraybuffer";
 
-      this._ws.onMessage((data) => {
-        this._handleMessage(data);
-      });
+        this._ws.onopen = () => {
+          this._log("WebSocket opened, authenticating...");
+          this._authenticate()
+            .then((restoredSubscriptions) => {
+              this._status = "connected";
+              this._reconnectAttempts = 0;
+              this._log("Connected and authenticated");
 
-      this._ws.onClose((code, reason) => {
-        this._log("WebSocket closed:", code, reason);
-        this._handleDisconnect(reason || "Connection closed");
-      });
+              if (restoredSubscriptions && restoredSubscriptions.length > 0) {
+                this._log("Server restored subscriptions:", restoredSubscriptions);
+              }
 
-      this._ws.onError((error) => {
-        this._log("WebSocket error:", error);
-        this._emit("error", error);
-      });
-    } catch (error) {
-      this._status = "disconnected";
-      throw error;
-    }
+              this._emitEvent("connect");
+
+              // Start heartbeat
+              this._startHeartbeat();
+
+              // Restore presence (client-side only, not persisted on server)
+              if (this._presence) {
+                this._sendPresence(this._presence);
+              }
+
+              resolve();
+            })
+            .catch((err) => {
+              this._log("Authentication failed:", err);
+              this._ws?.close();
+              reject(err);
+            });
+        };
+
+        this._ws.onmessage = (event) => {
+          this._handleMessage(event.data);
+        };
+
+        this._ws.onclose = (event) => {
+          const wasConnected = this._status === "connected";
+          this._status = "disconnected";
+          this._ws = null;
+
+          this._stopHeartbeat();
+
+          if (wasConnected) {
+            this._emitEvent("disconnect", event.reason || "Connection closed");
+          }
+
+          // Attempt reconnection
+          if (this._options.reconnect && this._reconnectAttempts < this._options.maxReconnectAttempts) {
+            this._scheduleReconnect();
+          }
+        };
+
+        this._ws.onerror = (event) => {
+          this._log("WebSocket error:", event);
+          this._emitEvent("error", new Error("WebSocket error"));
+
+          if (this._status === "connecting") {
+            reject(new Error("Connection failed"));
+          }
+        };
+      } catch (err) {
+        this._status = "disconnected";
+        reject(err);
+      }
+    });
   }
 
   /**
@@ -173,16 +268,21 @@ export class NoLagSocket {
    */
   disconnect(): void {
     this._log("Disconnecting...");
+    this._options.reconnect = false; // Prevent auto-reconnect
+
     this._stopHeartbeat();
-    this._clearReconnectTimer();
+
+    if (this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = null;
+    }
 
     if (this._ws) {
-      this._ws.close();
+      this._ws.close(1000, "Client disconnect");
       this._ws = null;
     }
 
     this._status = "disconnected";
-    this._subscriptions.clear();
     this._presenceMap.clear();
   }
 
@@ -190,6 +290,8 @@ export class NoLagSocket {
 
   /**
    * Set your presence (project-level)
+   *
+   * Note: Presence is client-side only and will be re-sent on reconnect.
    */
   setPresence(data: PresenceData, callback?: AckCallback): void {
     this._presence = data;
@@ -199,17 +301,11 @@ export class NoLagSocket {
       return;
     }
 
-    const message = createPresenceMessage(data);
-    this._ws.send(message);
-
-    if (callback) {
-      const ackId = this._generateAckId("presence");
-      this._ackCallbacks.set(ackId, callback);
-    }
+    this._sendPresence(data, callback);
   }
 
   /**
-   * Get all present actors in project
+   * Get all present actors in project (local cache)
    */
   getPresence(): ActorPresence[];
   getPresence(actorId: string): ActorPresence | undefined;
@@ -220,31 +316,85 @@ export class NoLagSocket {
     return Array.from(this._presenceMap.values());
   }
 
+  /**
+   * Request presence list from server
+   */
+  fetchPresence(): Promise<ActorPresence[]> {
+    return new Promise((resolve, reject) => {
+      if (!this.connected || !this._ws) {
+        reject(new Error("Not connected"));
+        return;
+      }
+
+      // Set up one-time handler for presence list response
+      const handler = (presenceList: ActorPresence[]) => {
+        this.off("presenceList", handler as EventHandler);
+        resolve(presenceList);
+      };
+      this.on("presenceList" as any, handler as any);
+
+      this._send({ type: "getPresence" });
+
+      // Timeout after 5 seconds
+      setTimeout(() => {
+        this.off("presenceList", handler as EventHandler);
+        reject(new Error("Presence request timeout"));
+      }, 5000);
+    });
+  }
+
   // ============ Topics ============
 
   /**
    * Subscribe to a topic
+   *
+   * Subscriptions are persisted server-side and automatically restored on reconnect.
+   * Load balancing settings default to connection-level options but can be overridden per-topic.
+   *
+   * @example
+   * ```typescript
+   * // Normal subscription - all clients receive all messages
+   * client.subscribe("chat/room/messages");
+   *
+   * // Override load balance for specific topic (if connection default is different)
+   * client.subscribe("jobs/process", { loadBalance: true });
+   * ```
    */
-  subscribe(topic: string, callback?: AckCallback): void {
+  subscribe(topic: string, callback?: AckCallback): void;
+  subscribe(topic: string, options: SubscribeOptions, callback?: AckCallback): void;
+  subscribe(
+    topic: string,
+    optionsOrCallback?: SubscribeOptions | AckCallback,
+    callback?: AckCallback
+  ): void {
+    const options = typeof optionsOrCallback === "object" ? optionsOrCallback : {};
+    const cb = typeof optionsOrCallback === "function" ? optionsOrCallback : callback;
+
     if (!this.connected || !this._ws) {
-      callback?.(new Error("Not connected"));
+      cb?.(new Error("Not connected"));
       return;
     }
 
-    this._log("Subscribing to:", topic);
+    // Use connection-level defaults, allow per-topic override
+    const loadBalance = options.loadBalance ?? this._options.loadBalance;
+    const loadBalanceGroup = options.loadBalanceGroup ?? this._options.loadBalanceGroup;
 
-    const message = createSubscribeMessage(topic);
-    this._ws.send(message);
-    this._subscriptions.add(topic);
+    this._log("Subscribing to:", topic, loadBalance ? "(load balanced)" : "");
 
-    if (callback) {
-      const ackId = this._generateAckId(`sub:${topic}`);
-      this._ackCallbacks.set(ackId, callback);
-    }
+    this._send({
+      type: "subscribe",
+      topic,
+      loadBalance,
+      loadBalanceGroup,
+    });
+
+    cb?.(null);
   }
 
   /**
    * Unsubscribe from a topic
+   *
+   * This also removes the subscription from server-side persistence.
    */
   unsubscribe(topic: string, callback?: AckCallback): void {
     if (!this.connected || !this._ws) {
@@ -253,15 +403,8 @@ export class NoLagSocket {
     }
 
     this._log("Unsubscribing from:", topic);
-
-    const message = createUnsubscribeMessage(topic);
-    this._ws.send(message);
-    this._subscriptions.delete(topic);
-
-    if (callback) {
-      const ackId = this._generateAckId(`unsub:${topic}`);
-      this._ackCallbacks.set(ackId, callback);
-    }
+    this._send({ type: "unsubscribe", topic });
+    callback?.(null);
   }
 
   /**
@@ -284,19 +427,23 @@ export class NoLagSocket {
 
     this._log("Emitting to:", topic, data);
 
-    const message = createTopicMessage(topic, data);
-    this._ws.send(message);
+    this._send({
+      type: "publish",
+      topic,
+      data,
+      qos: options.qos ?? this._options.qos,
+    });
 
-    if (ackCb) {
-      const ackId = this._generateAckId(`emit:${topic}`);
-      this._ackCallbacks.set(ackId, ackCb);
-    }
+    ackCb?.(null);
   }
 
   // ============ Event Handlers ============
 
   /**
    * Register event handler
+   *
+   * Note: Event handlers are local to this client instance.
+   * They are NOT persisted on the server.
    */
   on(event: "connect", handler: ConnectHandler): this;
   on(event: "disconnect", handler: DisconnectHandler): this;
@@ -334,9 +481,218 @@ export class NoLagSocket {
     return this;
   }
 
+  // ============ Fluent API ============
+
+  /**
+   * Set the app context for scoped pub/sub
+   *
+   * @example
+   * ```typescript
+   * const room = client.setApp('chat').setRoom('general');
+   *
+   * room.subscribe('messages');
+   * room.on('messages', (data) => console.log(data));
+   * room.emit('messages', { text: 'Hello!' });
+   *
+   * // Equivalent to:
+   * // client.subscribe('chat.general.messages');
+   * // client.on('chat.general.messages', ...);
+   * // client.emit('chat.general.messages', ...);
+   * ```
+   */
+  setApp(app: string): AppContext {
+    return new App(this, app);
+  }
+
   // ============ Private Methods ============
 
-  private _emit(event: string, ...args: unknown[]): void {
+  private _authenticate(): Promise<RestoredSubscription[]> {
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error("Authentication timeout"));
+      }, 10000);
+
+      // Set up one-time auth response handler
+      const authHandler = (msg: any) => {
+        if (msg.type === "auth") {
+          clearTimeout(timeout);
+          if (msg.success) {
+            this._actorTokenId = msg.actorTokenId || this._options.actorTokenId || null;
+            this._projectId = msg.projectId || null;
+            this._actorType = msg.actorType || null;
+            // Return restored subscriptions (server returns objects with loadBalance info)
+            resolve(msg.restoredSubscriptions || []);
+          } else {
+            reject(new Error(msg.error || "Authentication failed"));
+          }
+        }
+      };
+
+      // Temporarily store handler
+      (this as any)._authHandler = authHandler;
+
+      this._send({
+        type: "auth",
+        token: this._options.token,
+      });
+    });
+  }
+
+  private _sendPresence(data: PresenceData, callback?: AckCallback): void {
+    this._send({ type: "presence", data });
+    callback?.(null);
+  }
+
+  private _send(message: object): void {
+    if (!this._ws || this._ws.readyState !== WebSocket.OPEN) {
+      this._log("Cannot send, WebSocket not open");
+      return;
+    }
+
+    const payload = msgpackEncode(message);
+    this._ws.send(payload);
+  }
+
+  private _handleMessage(data: ArrayBuffer | string): void {
+    // Handle empty binary packet (heartbeat response)
+    if (data instanceof ArrayBuffer && data.byteLength === 0) {
+      this._log("Heartbeat pong received");
+      return;
+    }
+
+    let message: any;
+
+    try {
+      if (data instanceof ArrayBuffer) {
+        message = msgpackDecode(new Uint8Array(data));
+      } else {
+        // Fallback for text messages (JSON)
+        message = JSON.parse(data);
+      }
+    } catch (e) {
+      this._log("Failed to decode message:", e);
+      return;
+    }
+
+    this._log("Received:", message);
+
+    // Handle auth response (during connection)
+    if (message.type === "auth" && (this as any)._authHandler) {
+      (this as any)._authHandler(message);
+      delete (this as any)._authHandler;
+      return;
+    }
+
+    // Handle different message types
+    switch (message.type) {
+      case "message":
+        this._handleTopicMessage(message);
+        break;
+
+      case "presence":
+        this._handlePresenceEvent(message);
+        break;
+
+      case "presenceList":
+        this._handlePresenceList(message);
+        break;
+
+      case "subscribed":
+        this._log("Subscribed to:", message.topic);
+        break;
+
+      case "unsubscribed":
+        this._log("Unsubscribed from:", message.topic);
+        break;
+
+      case "error":
+        this._log("Server error:", message.error);
+        this._emitEvent("error", new Error(message.error));
+        break;
+
+      default:
+        this._log("Unknown message type:", message.type);
+    }
+  }
+
+  private _handleTopicMessage(message: { topic: string; data: unknown }): void {
+    const { topic, data } = message;
+    const meta: MessageMeta = {};
+
+    // Emit to specific topic handlers
+    this._emitEvent(topic, data, meta);
+
+    // Emit to wildcard handlers
+    const anyHandlers = this._eventHandlers.get("*");
+    if (anyHandlers) {
+      for (const handler of anyHandlers) {
+        try {
+          (handler as (topic: string, data: unknown, meta: MessageMeta) => void)(topic, data, meta);
+        } catch (e) {
+          console.error("Error in wildcard handler:", e);
+        }
+      }
+    }
+  }
+
+  private _handlePresenceEvent(message: { event: string; data: ActorPresence }): void {
+    const { event, data } = message;
+
+    if (!data || !data.actorTokenId) return;
+
+    switch (event) {
+      case "join":
+        this._presenceMap.set(data.actorTokenId, data);
+        this._emitEvent("presence:join", data);
+        break;
+
+      case "leave":
+        this._presenceMap.delete(data.actorTokenId);
+        this._emitEvent("presence:leave", data);
+        break;
+
+      case "update":
+        this._presenceMap.set(data.actorTokenId, data);
+        this._emitEvent("presence:update", data);
+        break;
+    }
+  }
+
+  private _handlePresenceList(message: { data: ActorPresence[] }): void {
+    // Update local presence map
+    this._presenceMap.clear();
+    for (const actor of message.data || []) {
+      if (actor.actorTokenId) {
+        this._presenceMap.set(actor.actorTokenId, actor);
+      }
+    }
+
+    // Emit for fetchPresence() promise
+    this._emitEvent("presenceList", message.data);
+  }
+
+  private _scheduleReconnect(): void {
+    if (this._reconnectTimer) return;
+
+    this._reconnectAttempts++;
+    const delay = Math.min(
+      this._options.reconnectInterval * Math.pow(1.5, this._reconnectAttempts - 1),
+      30000 // Max 30 seconds
+    );
+
+    this._log(`Reconnecting in ${delay}ms (attempt ${this._reconnectAttempts})`);
+    this._status = "reconnecting";
+    this._emitEvent("reconnect");
+
+    this._reconnectTimer = setTimeout(() => {
+      this._reconnectTimer = null;
+      this.connect().catch((err) => {
+        this._log("Reconnection failed:", err);
+      });
+    }, delay);
+  }
+
+  private _emitEvent(event: string, ...args: unknown[]): void {
     const handlers = this._eventHandlers.get(event);
     if (handlers) {
       for (const handler of handlers) {
@@ -347,201 +703,28 @@ export class NoLagSocket {
         }
       }
     }
-
-    // Also emit to wildcard handlers for topic messages
-    if (!event.startsWith("presence:") && !["connect", "disconnect", "reconnect", "error"].includes(event)) {
-      const anyHandlers = this._eventHandlers.get("*");
-      if (anyHandlers) {
-        for (const handler of anyHandlers) {
-          try {
-            (handler as (topic: string, ...args: unknown[]) => void)(event, ...args);
-          } catch (e) {
-            console.error("Error in wildcard handler:", e);
-          }
-        }
-      }
-    }
   }
 
-  private _handleMessage(data: ArrayBuffer): void {
-    // Empty message = heartbeat response
-    if (data.byteLength === 0) {
-      return;
-    }
-
-    let message: Message;
-    try {
-      message = decode(data);
-    } catch (e) {
-      this._log("Failed to decode message:", e);
-      return;
-    }
-
-    this._log("Received:", message);
-
-    // Handle init (server ready for auth)
-    if (isInitMessage(message)) {
-      this._log("Received init, sending auth...");
-      this._sendAuth();
-      return;
-    }
-
-    // Handle ack
-    if (isAckMessage(message)) {
-      this._handleAck(message);
-      return;
-    }
-
-    // Handle error
-    if (isErrorMessage(message)) {
-      this._emit("error", new Error(message.message));
-      return;
-    }
-
-    // Handle alert
-    if (isAlertMessage(message)) {
-      this._log("Alert:", message.message);
-      return;
-    }
-
-    // Handle topic message
-    if (isTopicMessage(message)) {
-      this._handleTopicMessage(message);
-      return;
-    }
-
-    // Handle presence event
-    if (isPresenceEventMessage(message)) {
-      this._handlePresenceEvent(message);
-      return;
-    }
-  }
-
-  private _handleAck(message: AckMessage): void {
-    // Auth ack - contains actor info
-    if (message.actorId && this._status === "connecting") {
-      this._actorTokenId = message.actorId;
-      this._projectId = message.projectId ?? null;
-      this._actorType = (message.actorType as ActorType) ?? null;
-      this._status = "connected";
-      this._startHeartbeat();
-      this._log("Connected as:", this._actorTokenId);
-      this._emit("connect");
-      return;
-    }
-
-    // Topic/action ack - trigger callbacks
-    // TODO: Match with pending callbacks
-  }
-
-  private _handleTopicMessage(message: TopicMessage): void {
-    const meta: MessageMeta = {
-      from: message.meta?.from,
-    };
-    this._emit(message.topic, message.data, meta);
-  }
-
-  private _handlePresenceEvent(message: PresenceEventMessage): void {
-    const { event, data } = message;
-    const actorPresence: ActorPresence = {
-      actorTokenId: data.actorTokenId,
-      actorType: (data.actorType as ActorType) ?? "device",
-      presence: data.presence ?? {},
-    };
-
-    switch (event) {
-      case "join":
-        this._presenceMap.set(data.actorTokenId, actorPresence);
-        this._emit("presence:join", actorPresence);
-        break;
-      case "leave":
-        this._presenceMap.delete(data.actorTokenId);
-        this._emit("presence:leave", actorPresence);
-        break;
-      case "update":
-        this._presenceMap.set(data.actorTokenId, actorPresence);
-        this._emit("presence:update", actorPresence);
-        break;
-    }
-  }
-
-  private _sendAuth(): void {
-    if (!this._ws) return;
-
-    const isReconnecting = this._status === "reconnecting";
-    const message = createAuthMessage(this._token, isReconnecting);
-    this._ws.send(message);
-  }
-
-  private _handleDisconnect(reason: string): void {
-    this._stopHeartbeat();
-    this._ws = null;
-
-    const wasConnected = this._status === "connected";
-    this._status = "disconnected";
-
-    if (wasConnected) {
-      this._emit("disconnect", reason);
-    }
-
-    // Auto-reconnect if enabled
-    if (this._options.reconnect && wasConnected) {
-      this._scheduleReconnect();
-    }
-  }
-
-  private _scheduleReconnect(): void {
-    this._clearReconnectTimer();
-
-    this._log("Scheduling reconnect in", this._options.reconnectInterval, "ms");
-
-    this._reconnectTimer = setTimeout(() => {
-      this._reconnect();
-    }, this._options.reconnectInterval);
-  }
-
-  private async _reconnect(): Promise<void> {
-    if (this._status === "connected" || this._status === "connecting") {
-      return;
-    }
-
-    this._log("Reconnecting...");
-    this._status = "reconnecting";
-
-    try {
-      await this.connect();
-      this._emit("reconnect");
-
-      // Re-subscribe to topics
-      for (const topic of this._subscriptions) {
-        this.subscribe(topic);
-      }
-
-      // Re-set presence
-      if (this._presence) {
-        this.setPresence(this._presence);
-      }
-    } catch (error) {
-      this._log("Reconnect failed:", error);
-      this._scheduleReconnect();
-    }
-  }
-
-  private _clearReconnectTimer(): void {
-    if (this._reconnectTimer) {
-      clearTimeout(this._reconnectTimer);
-      this._reconnectTimer = null;
+  private _log(...args: unknown[]): void {
+    if (this._options.debug) {
+      console.log("[NoLag]", ...args);
     }
   }
 
   private _startHeartbeat(): void {
+    if (this._options.heartbeatInterval <= 0) {
+      return;
+    }
+
     this._stopHeartbeat();
+
     this._heartbeatTimer = setInterval(() => {
-      if (this._ws && this._status === "connected") {
-        // Send empty message as heartbeat
+      if (this._ws && this._ws.readyState === WebSocket.OPEN) {
+        // Send empty binary packet as heartbeat
         this._ws.send(new ArrayBuffer(0));
+        this._log("Heartbeat ping sent");
       }
-    }, HEARTBEAT_INTERVAL);
+    }, this._options.heartbeatInterval);
   }
 
   private _stopHeartbeat(): void {
@@ -550,14 +733,87 @@ export class NoLagSocket {
       this._heartbeatTimer = null;
     }
   }
+}
 
-  private _generateAckId(prefix: string): string {
-    return `${prefix}:${++this._ackCounter}`;
+/**
+ * Room - Scoped context for pub/sub within an app.room
+ *
+ * Provides a cleaner API by automatically prefixing topics with app.room
+ */
+class Room implements RoomContext {
+  constructor(
+    private _client: NoLag,
+    private _app: string,
+    private _room: string
+  ) {}
+
+  get prefix(): string {
+    return `${this._app}.${this._room}`;
   }
 
-  private _log(...args: unknown[]): void {
-    if (this._options.debug) {
-      console.log("[NoLag]", ...args);
+  private _fullTopic(topic: string): string {
+    return `${this.prefix}.${topic}`;
+  }
+
+  subscribe(topic: string, callback?: AckCallback): void;
+  subscribe(topic: string, options: SubscribeOptions, callback?: AckCallback): void;
+  subscribe(
+    topic: string,
+    optionsOrCallback?: SubscribeOptions | AckCallback,
+    callback?: AckCallback
+  ): void {
+    const fullTopic = this._fullTopic(topic);
+    if (typeof optionsOrCallback === "function") {
+      this._client.subscribe(fullTopic, optionsOrCallback);
+    } else {
+      this._client.subscribe(fullTopic, optionsOrCallback || {}, callback);
     }
   }
+
+  unsubscribe(topic: string, callback?: AckCallback): void {
+    this._client.unsubscribe(this._fullTopic(topic), callback);
+  }
+
+  emit(topic: string, data: unknown, callback?: AckCallback): void;
+  emit(topic: string, data: unknown, options: EmitOptions, callback?: AckCallback): void;
+  emit(
+    topic: string,
+    data: unknown,
+    optionsOrCallback?: EmitOptions | AckCallback,
+    callback?: AckCallback
+  ): void {
+    const fullTopic = this._fullTopic(topic);
+    if (typeof optionsOrCallback === "function") {
+      this._client.emit(fullTopic, data, optionsOrCallback);
+    } else {
+      this._client.emit(fullTopic, data, optionsOrCallback || {}, callback);
+    }
+  }
+
+  on(topic: string, handler: MessageHandler): this {
+    this._client.on(this._fullTopic(topic), handler);
+    return this;
+  }
+
+  off(topic: string, handler?: MessageHandler): this {
+    this._client.off(this._fullTopic(topic), handler as EventHandler);
+    return this;
+  }
 }
+
+/**
+ * App - Intermediate context for setting the room
+ */
+class App implements AppContext {
+  constructor(
+    private _client: NoLag,
+    private _app: string
+  ) {}
+
+  setRoom(room: string): RoomContext {
+    return new Room(this._client, this._app, room);
+  }
+}
+
+// Legacy alias
+export { NoLag as NoLagSocket };
