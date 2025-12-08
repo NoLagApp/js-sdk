@@ -274,6 +274,7 @@ export class NoLag {
    */
   disconnect(): void {
     this._log("Disconnecting...");
+    const wasConnected = this._status === "connected";
     this._options.reconnect = false; // Prevent auto-reconnect
 
     this._stopHeartbeat();
@@ -290,6 +291,11 @@ export class NoLag {
 
     this._status = "disconnected";
     this._presenceMap.clear();
+
+    // Emit disconnect event if we were connected
+    if (wasConnected) {
+      this._emitEvent("disconnect", "Client disconnect");
+    }
   }
 
   // ============ Presence ============
