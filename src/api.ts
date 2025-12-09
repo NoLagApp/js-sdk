@@ -2,7 +2,9 @@
  * NoLag REST API Client
  *
  * Provides management operations for NoLag resources via REST API.
- * Use this for creating/managing organizations, projects, apps, rooms, and actors.
+ * API keys are scoped to a specific project, so no organization or project IDs needed.
+ *
+ * Use this for managing apps, rooms, and actors within your project.
  * For real-time messaging, use the main NoLag WebSocket client.
  */
 
@@ -11,12 +13,6 @@ import {
   ListOptions,
   PaginatedResult,
   ApiError,
-  Organization,
-  OrganizationCreate,
-  OrganizationUpdate,
-  Project,
-  ProjectCreate,
-  ProjectUpdate,
   App,
   AppCreate,
   AppUpdate,
@@ -27,7 +23,6 @@ import {
   ActorWithToken,
   ActorCreate,
   ActorUpdate,
-  Blueprint,
 } from "./api-types";
 
 const DEFAULT_BASE_URL = "https://api.nolag.app/v1";
@@ -36,22 +31,24 @@ const DEFAULT_TIMEOUT = 30000;
 /**
  * NoLag REST API Client
  *
+ * API keys are project-scoped, so you don't need to pass organization or project IDs.
+ *
  * @example
  * ```typescript
- * // Using API key
- * const api = new NoLagApi('your-api-key');
+ * // Create client with project API key
+ * const api = new NoLagApi('nlg_live_xxx.secret');
  *
- * // List organizations
- * const orgs = await api.organizations.list();
+ * // List apps in your project
+ * const apps = await api.apps.list();
  *
- * // Create a project
- * const project = await api.projects.create(orgId, {
- *   name: 'My Project',
- *   description: 'A real-time app'
+ * // Create a room
+ * const room = await api.rooms.create(appId, {
+ *   name: 'chat-room',
+ *   description: 'General chat'
  * });
  *
  * // Create an actor and get the access token
- * const actor = await api.actors.create(orgId, projectId, {
+ * const actor = await api.actors.create({
  *   name: 'web-client',
  *   actorType: 'device'
  * });
@@ -64,12 +61,9 @@ export class NoLagApi {
   private _timeout: number;
   private _customHeaders: Record<string, string>;
 
-  readonly organizations: OrganizationsApi;
-  readonly projects: ProjectsApi;
   readonly apps: AppsApi;
   readonly rooms: RoomsApi;
   readonly actors: ActorsApi;
-  readonly blueprints: BlueprintsApi;
 
   constructor(apiKey: string, options?: NoLagApiOptions) {
     this._apiKey = apiKey;
@@ -78,12 +72,9 @@ export class NoLagApi {
     this._customHeaders = options?.headers ?? {};
 
     // Initialize sub-APIs
-    this.organizations = new OrganizationsApi(this);
-    this.projects = new ProjectsApi(this);
     this.apps = new AppsApi(this);
     this.rooms = new RoomsApi(this);
     this.actors = new ActorsApi(this);
-    this.blueprints = new BlueprintsApi(this);
   }
 
   /**
@@ -186,230 +177,56 @@ export class NoLagApiError extends Error {
   }
 }
 
-// ============ Organizations API ============
-
-class OrganizationsApi {
-  constructor(private _api: NoLagApi) {}
-
-  /**
-   * List organizations the authenticated user has access to
-   */
-  async list(options?: ListOptions): Promise<PaginatedResult<Organization>> {
-    return this._api.request<PaginatedResult<Organization>>(
-      "GET",
-      "/organizations",
-      undefined,
-      options as Record<string, string | number | undefined>
-    );
-  }
-
-  /**
-   * Get a single organization by ID
-   */
-  async get(organizationId: string): Promise<Organization> {
-    return this._api.request<Organization>(
-      "GET",
-      `/organizations/${organizationId}`
-    );
-  }
-
-  /**
-   * Create a new organization
-   */
-  async create(data: OrganizationCreate): Promise<Organization> {
-    return this._api.request<Organization>("POST", "/organizations", data);
-  }
-
-  /**
-   * Update an organization
-   */
-  async update(
-    organizationId: string,
-    data: OrganizationUpdate
-  ): Promise<Organization> {
-    return this._api.request<Organization>(
-      "PATCH",
-      `/organizations/${organizationId}`,
-      data
-    );
-  }
-
-  /**
-   * Delete an organization (soft delete)
-   */
-  async delete(organizationId: string): Promise<{ success: boolean }> {
-    return this._api.request<{ success: boolean }>(
-      "DELETE",
-      `/organizations/${organizationId}`
-    );
-  }
-}
-
-// ============ Projects API ============
-
-class ProjectsApi {
-  constructor(private _api: NoLagApi) {}
-
-  /**
-   * List projects in an organization
-   */
-  async list(
-    organizationId: string,
-    options?: ListOptions
-  ): Promise<PaginatedResult<Project>> {
-    return this._api.request<PaginatedResult<Project>>(
-      "GET",
-      `/organizations/${organizationId}/projects`,
-      undefined,
-      options as Record<string, string | number | undefined>
-    );
-  }
-
-  /**
-   * Get a single project by ID
-   */
-  async get(organizationId: string, projectId: string): Promise<Project> {
-    return this._api.request<Project>(
-      "GET",
-      `/organizations/${organizationId}/projects/${projectId}`
-    );
-  }
-
-  /**
-   * Create a new project
-   */
-  async create(
-    organizationId: string,
-    data: ProjectCreate
-  ): Promise<Project> {
-    return this._api.request<Project>(
-      "POST",
-      `/organizations/${organizationId}/projects`,
-      data
-    );
-  }
-
-  /**
-   * Update a project
-   */
-  async update(
-    organizationId: string,
-    projectId: string,
-    data: ProjectUpdate
-  ): Promise<Project> {
-    return this._api.request<Project>(
-      "PATCH",
-      `/organizations/${organizationId}/projects/${projectId}`,
-      data
-    );
-  }
-
-  /**
-   * Delete a project (soft delete)
-   */
-  async delete(
-    organizationId: string,
-    projectId: string
-  ): Promise<{ success: boolean }> {
-    return this._api.request<{ success: boolean }>(
-      "DELETE",
-      `/organizations/${organizationId}/projects/${projectId}`
-    );
-  }
-}
-
 // ============ Apps API ============
 
 class AppsApi {
   constructor(private _api: NoLagApi) {}
 
   /**
-   * List apps in a project
+   * List all apps in the project
    */
-  async list(
-    organizationId: string,
-    projectId: string,
-    options?: ListOptions
-  ): Promise<PaginatedResult<App>> {
+  async list(options?: ListOptions): Promise<PaginatedResult<App>> {
     return this._api.request<PaginatedResult<App>>(
       "GET",
-      `/organizations/${organizationId}/projects/${projectId}/apps`,
+      "/apps",
       undefined,
       options as Record<string, string | number | undefined>
     );
   }
 
   /**
-   * Get a single app by ID
+   * Get an app by ID
    */
-  async get(
-    organizationId: string,
-    projectId: string,
-    appId: string
-  ): Promise<App> {
-    return this._api.request<App>(
-      "GET",
-      `/organizations/${organizationId}/projects/${projectId}/apps/${appId}`
-    );
+  async get(appId: string): Promise<App> {
+    return this._api.request<App>("GET", `/apps/${appId}`);
   }
 
   /**
    * Create a new app
    */
-  async create(
-    organizationId: string,
-    projectId: string,
-    data: AppCreate
-  ): Promise<App> {
-    return this._api.request<App>(
-      "POST",
-      `/organizations/${organizationId}/projects/${projectId}/apps`,
-      data
-    );
+  async create(data: AppCreate): Promise<App> {
+    return this._api.request<App>("POST", "/apps", data);
   }
 
   /**
    * Update an app
    */
-  async update(
-    organizationId: string,
-    projectId: string,
-    appId: string,
-    data: AppUpdate
-  ): Promise<App> {
-    return this._api.request<App>(
-      "PATCH",
-      `/organizations/${organizationId}/projects/${projectId}/apps/${appId}`,
-      data
-    );
+  async update(appId: string, data: AppUpdate): Promise<App> {
+    return this._api.request<App>("PATCH", `/apps/${appId}`, data);
   }
 
   /**
    * Delete an app (soft delete)
    */
-  async delete(
-    organizationId: string,
-    projectId: string,
-    appId: string
-  ): Promise<{ success: boolean }> {
-    return this._api.request<{ success: boolean }>(
-      "DELETE",
-      `/organizations/${organizationId}/projects/${projectId}/apps/${appId}`
-    );
+  async delete(appId: string): Promise<{ success: boolean }> {
+    return this._api.request<{ success: boolean }>("DELETE", `/apps/${appId}`);
   }
 
   /**
    * Reset app to its blueprint configuration
    */
-  async resetToBlueprint(
-    organizationId: string,
-    projectId: string,
-    appId: string
-  ): Promise<App> {
-    return this._api.request<App>(
-      "POST",
-      `/organizations/${organizationId}/projects/${projectId}/apps/${appId}/reset-to-blueprint`
-    );
+  async resetToBlueprint(appId: string): Promise<App> {
+    return this._api.request<App>("POST", `/apps/${appId}/reset-to-blueprint`);
   }
 }
 
@@ -419,63 +236,33 @@ class RoomsApi {
   constructor(private _api: NoLagApi) {}
 
   /**
-   * List rooms in an app
+   * List all rooms in an app
    */
-  async list(
-    organizationId: string,
-    projectId: string,
-    appId: string
-  ): Promise<Room[]> {
-    return this._api.request<Room[]>(
-      "GET",
-      `/organizations/${organizationId}/projects/${projectId}/apps/${appId}/rooms`
-    );
+  async list(appId: string): Promise<Room[]> {
+    return this._api.request<Room[]>("GET", `/apps/${appId}/rooms`);
   }
 
   /**
-   * Get a single room by ID
+   * Get a room by ID
    */
-  async get(
-    organizationId: string,
-    projectId: string,
-    appId: string,
-    roomId: string
-  ): Promise<Room> {
-    return this._api.request<Room>(
-      "GET",
-      `/organizations/${organizationId}/projects/${projectId}/apps/${appId}/rooms/${roomId}`
-    );
+  async get(appId: string, roomId: string): Promise<Room> {
+    return this._api.request<Room>("GET", `/apps/${appId}/rooms/${roomId}`);
   }
 
   /**
    * Create a new dynamic room
    */
-  async create(
-    organizationId: string,
-    projectId: string,
-    appId: string,
-    data: RoomCreate
-  ): Promise<Room> {
-    return this._api.request<Room>(
-      "POST",
-      `/organizations/${organizationId}/projects/${projectId}/apps/${appId}/rooms`,
-      data
-    );
+  async create(appId: string, data: RoomCreate): Promise<Room> {
+    return this._api.request<Room>("POST", `/apps/${appId}/rooms`, data);
   }
 
   /**
    * Update a room
    */
-  async update(
-    organizationId: string,
-    projectId: string,
-    appId: string,
-    roomId: string,
-    data: RoomUpdate
-  ): Promise<Room> {
+  async update(appId: string, roomId: string, data: RoomUpdate): Promise<Room> {
     return this._api.request<Room>(
       "PATCH",
-      `/organizations/${organizationId}/projects/${projectId}/apps/${appId}/rooms/${roomId}`,
+      `/apps/${appId}/rooms/${roomId}`,
       data
     );
   }
@@ -483,16 +270,8 @@ class RoomsApi {
   /**
    * Delete a dynamic room (static rooms cannot be deleted)
    */
-  async delete(
-    organizationId: string,
-    projectId: string,
-    appId: string,
-    roomId: string
-  ): Promise<void> {
-    await this._api.request<void>(
-      "DELETE",
-      `/organizations/${organizationId}/projects/${projectId}/apps/${appId}/rooms/${roomId}`
-    );
+  async delete(appId: string, roomId: string): Promise<void> {
+    await this._api.request<void>("DELETE", `/apps/${appId}/rooms/${roomId}`);
   }
 }
 
@@ -502,30 +281,17 @@ class ActorsApi {
   constructor(private _api: NoLagApi) {}
 
   /**
-   * List actors in a project
+   * List all actors in the project
    */
-  async list(
-    organizationId: string,
-    projectId: string
-  ): Promise<Actor[]> {
-    return this._api.request<Actor[]>(
-      "GET",
-      `/organizations/${organizationId}/projects/${projectId}/actors`
-    );
+  async list(): Promise<Actor[]> {
+    return this._api.request<Actor[]>("GET", "/actors");
   }
 
   /**
-   * Get a single actor by ID
+   * Get an actor by ID
    */
-  async get(
-    organizationId: string,
-    projectId: string,
-    actorId: string
-  ): Promise<Actor> {
-    return this._api.request<Actor>(
-      "GET",
-      `/organizations/${organizationId}/projects/${projectId}/actors/${actorId}`
-    );
+  async get(actorId: string): Promise<Actor> {
+    return this._api.request<Actor>("GET", `/actors/${actorId}`);
   }
 
   /**
@@ -533,75 +299,21 @@ class ActorsApi {
    *
    * IMPORTANT: The access token is only returned once! Save it immediately.
    */
-  async create(
-    organizationId: string,
-    projectId: string,
-    data: ActorCreate
-  ): Promise<ActorWithToken> {
-    return this._api.request<ActorWithToken>(
-      "POST",
-      `/organizations/${organizationId}/projects/${projectId}/actors`,
-      data
-    );
+  async create(data: ActorCreate): Promise<ActorWithToken> {
+    return this._api.request<ActorWithToken>("POST", "/actors", data);
   }
 
   /**
    * Update an actor
    */
-  async update(
-    organizationId: string,
-    projectId: string,
-    actorId: string,
-    data: ActorUpdate
-  ): Promise<Actor> {
-    return this._api.request<Actor>(
-      "PATCH",
-      `/organizations/${organizationId}/projects/${projectId}/actors/${actorId}`,
-      data
-    );
+  async update(actorId: string, data: ActorUpdate): Promise<Actor> {
+    return this._api.request<Actor>("PATCH", `/actors/${actorId}`, data);
   }
 
   /**
    * Delete an actor
    */
-  async delete(
-    organizationId: string,
-    projectId: string,
-    actorId: string
-  ): Promise<void> {
-    await this._api.request<void>(
-      "DELETE",
-      `/organizations/${organizationId}/projects/${projectId}/actors/${actorId}`
-    );
-  }
-}
-
-// ============ Blueprints API ============
-
-class BlueprintsApi {
-  constructor(private _api: NoLagApi) {}
-
-  /**
-   * List public blueprints
-   */
-  async listPublic(): Promise<Blueprint[]> {
-    return this._api.request<Blueprint[]>("GET", "/blueprints");
-  }
-
-  /**
-   * List organization's private blueprints
-   */
-  async list(organizationId: string): Promise<Blueprint[]> {
-    return this._api.request<Blueprint[]>(
-      "GET",
-      `/organizations/${organizationId}/blueprints`
-    );
-  }
-
-  /**
-   * Get a blueprint by ID
-   */
-  async get(blueprintId: string): Promise<Blueprint> {
-    return this._api.request<Blueprint>("GET", `/blueprints/${blueprintId}`);
+  async delete(actorId: string): Promise<void> {
+    await this._api.request<void>("DELETE", `/actors/${actorId}`);
   }
 }

@@ -308,7 +308,7 @@ describe.skipIf(!TEST_TOKEN)("NoLag SDK E2E with Kraken-v2", () => {
 
       // Try to subscribe to unauthorized topic (if ACL is enforced)
       // This test depends on Titus ACL configuration
-      client.subscribe("unauthorized.topic.that.should.fail");
+      client.subscribe("unauthorized/topic/that/should/fail");
 
       await sleep(500);
 
@@ -323,7 +323,7 @@ describe.skipIf(!TEST_TOKEN)("NoLag SDK E2E with Kraken-v2", () => {
       });
 
       let errorReceived = false;
-      unconnectedClient.subscribe("test.topic", (err) => {
+      unconnectedClient.subscribe("test/topic", (err) => {
         if (err) errorReceived = true;
       });
 
@@ -337,7 +337,7 @@ describe.skipIf(!TEST_TOKEN)("NoLag SDK E2E with Kraken-v2", () => {
       });
 
       let errorReceived = false;
-      unconnectedClient.emit("test.topic", { data: "test" }, (err) => {
+      unconnectedClient.emit("test/topic", { data: "test" }, (err) => {
         if (err) errorReceived = true;
       });
 

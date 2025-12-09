@@ -1,5 +1,9 @@
 /**
  * NoLag REST API Types
+ *
+ * These types are for the project-scoped API.
+ * API keys are scoped to a specific project, so organization and project IDs
+ * are implicit and not needed in API calls.
  */
 
 // ============ Common Types ============
@@ -16,59 +20,6 @@ export interface ApiError {
   statusCode: number;
   message: string;
   error?: string;
-}
-
-// ============ Organization Types ============
-
-export interface Organization {
-  organizationId: string;
-  name: string;
-  slug?: string;
-  description?: string;
-  ownerId: string;
-  createdAt: string;
-  updatedAt: string;
-  deletedAt?: string;
-}
-
-export interface OrganizationCreate {
-  name: string;
-  slug?: string;
-  description?: string;
-}
-
-export interface OrganizationUpdate {
-  name?: string;
-  slug?: string;
-  description?: string;
-}
-
-// ============ Project Types ============
-
-export interface Project {
-  projectId: string;
-  organizationId: string;
-  name: string;
-  slug?: string;
-  description?: string;
-  environment?: string;
-  createdAt: string;
-  updatedAt: string;
-  deletedAt?: string;
-}
-
-export interface ProjectCreate {
-  name: string;
-  slug?: string;
-  description?: string;
-  environment?: string;
-}
-
-export interface ProjectUpdate {
-  name?: string;
-  slug?: string;
-  description?: string;
-  environment?: string;
 }
 
 // ============ App Types ============
@@ -169,21 +120,6 @@ export interface ActorUpdate {
   externalId?: string;
   metadata?: Record<string, unknown>;
   isActive?: boolean;
-}
-
-// ============ Blueprint Types ============
-
-export interface Blueprint {
-  blueprintId: string;
-  organizationId?: string;
-  name: string;
-  slug: string;
-  description?: string;
-  isPublic: boolean;
-  version: string;
-  config?: Record<string, unknown>;
-  createdAt: string;
-  updatedAt: string;
 }
 
 // ============ API Options ============
