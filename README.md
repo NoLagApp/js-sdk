@@ -1,17 +1,17 @@
-# @nolag/js
+# @nolag/js-sdk
 
 Real-time messaging SDK for browser and Node.js. Connects to Kraken Proxy via WebSocket with MessagePack.
 
 ## Installation
 
 ```bash
-npm install @nolag/js
+npm install @nolag/js-sdk
 ```
 
 ## Quick Start
 
 ```typescript
-import { NoLag } from "@nolag/js";
+import { NoLag } from "@nolag/js-sdk";
 
 const client = new NoLag({
   token: "your_actor_access_token",
@@ -51,7 +51,7 @@ await client.connect();
 ### Creating a Client
 
 ```typescript
-import { NoLag } from "@nolag/js";
+import { NoLag } from "@nolag/js-sdk";
 
 const client = new NoLag(options);
 ```
@@ -256,7 +256,7 @@ client.emit("important/data", data, { qos: 2 });
 ## Full Example
 
 ```typescript
-import { NoLag } from "@nolag/js";
+import { NoLag } from "@nolag/js-sdk";
 
 async function main() {
   const client = new NoLag({
@@ -318,7 +318,7 @@ main().catch(console.error);
 
 ```html
 <script type="module">
-  import { NoLag } from "https://unpkg.com/@nolag/js/dist/browser.js";
+  import { NoLag } from "https://unpkg.com/@nolag/js-sdk/dist/browser.js";
 
   const client = new NoLag({
     token: "your_token"
@@ -347,7 +347,7 @@ import {
   ActorType,
   MessageMeta,
   QoS,
-} from "@nolag/js";
+} from "@nolag/js-sdk";
 ```
 
 ---
