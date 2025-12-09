@@ -102,6 +102,11 @@ export interface EmitOptions {
   qos?: QoS;
   /** Retain message on broker (default: false) */
   retain?: boolean;
+  /**
+   * Whether to receive this message back if subscribed to the same topic.
+   * (default: true - you will receive your own messages)
+   */
+  echo?: boolean;
 }
 
 // Restored subscription info (received from server on reconnect)

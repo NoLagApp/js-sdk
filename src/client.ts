@@ -444,6 +444,7 @@ export class NoLag {
       topic,
       data,
       qos: options.qos ?? this._options.qos,
+      echo: options.echo ?? true,
     });
 
     ackCb?.(null);

@@ -11,6 +11,10 @@ export { NoLagSocket } from "./client";
 export * from "./types";
 export type { WebSocketFactory, IUnifiedWebSocket } from "./websocket/types";
 
+// Export REST API client
+export { NoLagApi, NoLagApiError } from "./api";
+export * from "./api-types";
+
 /**
  * Create a NoLag client for Node.js
  */

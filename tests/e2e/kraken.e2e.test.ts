@@ -464,3 +464,100 @@ describe.skipIf(!TEST_TOKEN)("Load Balancing", () => {
     client.disconnect();
   });
 });
+
+describe.skipIf(!TEST_TOKEN)("Echo", () => {
+  let client: ReturnType<typeof NoLag>;
+
+  beforeEach(async () => {
+    client = NoLag(TEST_TOKEN!, {
+      url: TEST_URL,
+      debug: true,
+      reconnect: false,
+      heartbeatInterval: 0,
+    });
+    await client.connect();
+  });
+
+  afterEach(() => {
+    client?.disconnect();
+  });
+
+  it("should receive own message when echo is true (default)", async () => {
+    const topic = `test.echo.enabled.${Date.now()}`;
+    const testData = { message: "echo me" };
+
+    let receivedData: any = null;
+
+    client.subscribe(topic);
+    client.on(topic, (data) => {
+      receivedData = data;
+    });
+
+    await sleep(200);
+
+    // Emit with echo=true (default)
+    client.emit(topic, testData);
+
+    await waitFor(() => receivedData !== null, 5000);
+
+    expect(receivedData).toEqual(testData);
+  });
+
+  it("should NOT receive own message when echo is false", async () => {
+    const topic = `test.echo.disabled.${Date.now()}`;
+    const testData = { message: "no echo" };
+
+    let receivedData: any = null;
+
+    client.subscribe(topic);
+    client.on(topic, (data) => {
+      receivedData = data;
+    });
+
+    await sleep(200);
+
+    // Emit with echo=false
+    client.emit(topic, testData, { echo: false });
+
+    // Wait a bit to ensure message had time to arrive if it was going to
+    await sleep(500);
+
+    // Should NOT have received the message
+    expect(receivedData).toBeNull();
+  });
+
+  it("should receive message from another source even when original sender used echo=false", async () => {
+    // This test verifies that echo=false only filters the sender's own messages,
+    // not messages from other publishers on the same topic
+
+    const topic = `test.echo.mixed.${Date.now()}`;
+
+    let receivedCount = 0;
+    const receivedMessages: any[] = [];
+
+    client.subscribe(topic);
+    client.on(topic, (data) => {
+      receivedCount++;
+      receivedMessages.push(data);
+    });
+
+    await sleep(200);
+
+    // Emit with echo=true (should receive)
+    client.emit(topic, { id: 1, echo: true });
+
+    // Emit with echo=false (should NOT receive)
+    client.emit(topic, { id: 2, echo: false }, { echo: false });
+
+    // Emit with echo=true again (should receive)
+    client.emit(topic, { id: 3, echo: true });
+
+    await waitFor(() => receivedCount >= 2, 5000);
+
+    // Should receive messages 1 and 3, but not 2
+    expect(receivedMessages.length).toBe(2);
+    expect(receivedMessages.some(m => m.id === 1)).toBe(true);
+    expect(receivedMessages.some(m => m.id === 3)).toBe(true);
+    expect(receivedMessages.some(m => m.id === 2)).toBe(false);
+  });
+});
