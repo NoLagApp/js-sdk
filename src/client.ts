@@ -72,9 +72,9 @@ interface InternalOptions extends Required<Omit<NoLagOptions, 'loadBalanceGroup'
  * room.emit('messages', { text: 'Hello!' });
  *
  * // Direct API (full topic paths)
- * client.subscribe('chat.general.messages');
- * client.on('chat.general.messages', (data) => console.log(data));
- * client.emit('chat.general.messages', { text: 'Hello!' });
+ * client.subscribe('chat/general/messages');
+ * client.on('chat/general/messages', (data) => console.log(data));
+ * client.emit('chat/general/messages', { text: 'Hello!' });
  *
  * // Worker with load balancing
  * const worker = new NoLag('worker_token', {
@@ -508,9 +508,9 @@ export class NoLag {
    * room.emit('messages', { text: 'Hello!' });
    *
    * // Equivalent to:
-   * // client.subscribe('chat.general.messages');
-   * // client.on('chat.general.messages', ...);
-   * // client.emit('chat.general.messages', ...);
+   * // client.subscribe('chat/general/messages');
+   * // client.on('chat/general/messages', ...);
+   * // client.emit('chat/general/messages', ...);
    * ```
    */
   setApp(app: string): AppContext {
@@ -761,11 +761,11 @@ class Room implements RoomContext {
   ) {}
 
   get prefix(): string {
-    return `${this._app}.${this._room}`;
+    return `${this._app}/${this._room}`;
   }
 
   private _fullTopic(topic: string): string {
-    return `${this.prefix}.${topic}`;
+    return `${this.prefix}/${topic}`;
   }
 
   subscribe(topic: string, callback?: AckCallback): void;

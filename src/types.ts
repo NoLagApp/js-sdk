@@ -136,7 +136,7 @@ export interface AppContext {
 
 // Room context for fluent API
 export interface RoomContext {
-  /** The full topic prefix (app.room) */
+  /** The full topic prefix (app/room) */
   readonly prefix: string;
 
   /** Subscribe to a topic in this room */

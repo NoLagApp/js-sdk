@@ -253,7 +253,7 @@ describe.skipIf(!TEST_TOKEN)("NoLag SDK E2E with Kraken-v2", () => {
 
     it("should have correct prefix", () => {
       const room = client.setApp("testapp").setRoom("testroom");
-      expect(room.prefix).toBe("testapp.testroom");
+      expect(room.prefix).toBe("testapp/testroom");
     });
   });
 
