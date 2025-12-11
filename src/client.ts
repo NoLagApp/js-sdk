@@ -13,6 +13,8 @@ import {
   ActorType,
   PresenceData,
   ActorPresence,
+  LobbyPresenceEvent,
+  LobbyPresenceState,
   MessageMeta,
   EmitOptions,
   SubscribeOptions,
@@ -22,11 +24,17 @@ import {
   ReconnectHandler,
   ErrorHandler,
   PresenceHandler,
+  LobbyPresenceHandler,
   MessageHandler,
   AckCallback,
   QoS,
   AppContext,
   RoomContext,
+  LobbyContext,
+  ReplayStartEvent,
+  ReplayEndEvent,
+  ReplayStartHandler,
+  ReplayEndHandler,
 } from "./types";
 import { IUnifiedWebSocket, WebSocketFactory, WS_READY_STATE } from "./websocket/types";
 
@@ -41,7 +49,10 @@ type EventHandler =
   | ReconnectHandler
   | ErrorHandler
   | PresenceHandler
-  | MessageHandler;
+  | LobbyPresenceHandler
+  | MessageHandler
+  | ReplayStartHandler
+  | ReplayEndHandler;
 
 // Internal options type with token included
 interface InternalOptions extends Required<Omit<NoLagOptions, 'loadBalanceGroup' | 'actorTokenId' | 'heartbeatInterval'>> {
@@ -101,6 +112,15 @@ export class NoLag {
   private _presence: PresenceData | null = null;
   private _presenceMap: Map<string, ActorPresence> = new Map();
 
+  // Replay state
+  private _isReplaying = false;
+  private _replayInfo: { count: number; received: number } | null = null;
+
+  // ACK batching
+  private _pendingAcks: string[] = [];
+  private _ackTimer: ReturnType<typeof setTimeout> | null = null;
+  private _ackBatchInterval = 100; // ms
+
   // Event handlers (local - for routing messages to callbacks)
   private _eventHandlers: Map<string, Set<EventHandler>> = new Map();
 
@@ -153,6 +173,16 @@ export class NoLag {
 
   get actorType(): ActorType | null {
     return this._actorType;
+  }
+
+  /** Whether we're currently replaying missed messages */
+  get isReplayingMessages(): boolean {
+    return this._isReplaying;
+  }
+
+  /** Current replay progress (count and received), or null if not replaying */
+  get replayProgress(): { count: number; received: number } | null {
+    return this._replayInfo;
   }
 
   get projectId(): string | null {
@@ -610,12 +640,36 @@ export class NoLag {
         this._handlePresenceList(message);
         break;
 
+      case "lobbyPresence":
+        this._handleLobbyPresenceEvent(message);
+        break;
+
+      case "lobbySubscribed":
+        this._handleLobbySubscribed(message);
+        break;
+
+      case "lobbyUnsubscribed":
+        this._log("Unsubscribed from lobby:", message.lobbyId);
+        break;
+
+      case "lobbyPresenceList":
+        this._handleLobbyPresenceList(message);
+        break;
+
       case "subscribed":
         this._log("Subscribed to:", message.topic);
         break;
 
       case "unsubscribed":
         this._log("Unsubscribed from:", message.topic);
+        break;
+
+      case "replayStart":
+        this._handleReplayStart(message);
+        break;
+
+      case "replayEnd":
+        this._handleReplayEnd(message);
         break;
 
       case "error":
@@ -628,9 +682,17 @@ export class NoLag {
     }
   }
 
-  private _handleTopicMessage(message: { topic: string; data: unknown }): void {
-    const { topic, data } = message;
-    const meta: MessageMeta = {};
+  private _handleTopicMessage(message: { topic: string; data: unknown; isReplay?: boolean; msgId?: string; requiresAck?: boolean }): void {
+    const { topic, data, isReplay, msgId, requiresAck } = message;
+    const meta: MessageMeta = {
+      isReplay: isReplay ?? this._isReplaying,
+      msgId,
+    };
+
+    // Track replay progress
+    if (this._replayInfo && meta.isReplay) {
+      this._replayInfo.received++;
+    }
 
     // Emit to specific topic handlers
     this._emitEvent(topic, data, meta);
@@ -646,6 +708,60 @@ export class NoLag {
         }
       }
     }
+
+    // Queue ACK if required
+    if (requiresAck && msgId) {
+      this._queueAck(msgId);
+    }
+  }
+
+  private _handleReplayStart(message: { count: number; oldestTimestamp?: string; newestTimestamp?: string }): void {
+    this._isReplaying = true;
+    this._replayInfo = { count: message.count, received: 0 };
+    this._log("Replay starting:", message.count, "messages");
+
+    this._emitEvent("replay:start", {
+      count: message.count,
+      oldestTimestamp: message.oldestTimestamp,
+      newestTimestamp: message.newestTimestamp,
+    });
+  }
+
+  private _handleReplayEnd(message: { replayed: number }): void {
+    this._isReplaying = false;
+    this._log("Replay complete:", message.replayed, "messages");
+
+    this._emitEvent("replay:end", {
+      replayed: message.replayed,
+    });
+
+    this._replayInfo = null;
+  }
+
+  private _queueAck(msgId: string): void {
+    this._pendingAcks.push(msgId);
+
+    // Debounce ACK sending
+    if (!this._ackTimer) {
+      this._ackTimer = setTimeout(() => {
+        this._flushAcks();
+      }, this._ackBatchInterval);
+    }
+  }
+
+  private _flushAcks(): void {
+    if (this._pendingAcks.length === 0) return;
+
+    if (this._pendingAcks.length === 1) {
+      // Single ACK
+      this._send({ type: "ack", msgId: this._pendingAcks[0] });
+    } else {
+      // Batch ACK
+      this._send({ type: "batchAck", msgIds: this._pendingAcks });
+    }
+
+    this._pendingAcks = [];
+    this._ackTimer = null;
   }
 
   private _handlePresenceEvent(message: { event: string; data: ActorPresence }): void {
@@ -671,7 +787,7 @@ export class NoLag {
     }
   }
 
-  private _handlePresenceList(message: { data: ActorPresence[] }): void {
+  private _handlePresenceList(message: { data: ActorPresence[]; roomId?: string }): void {
     // Update local presence map
     this._presenceMap.clear();
     for (const actor of message.data || []) {
@@ -680,8 +796,49 @@ export class NoLag {
       }
     }
 
-    // Emit for fetchPresence() promise
-    this._emitEvent("presenceList", message.data);
+    // Emit for fetchPresence() promise (with optional roomId for room-scoped presence)
+    this._emitEvent("presenceList", message.data, message.roomId);
+  }
+
+  private _handleLobbyPresenceEvent(message: {
+    event: string;
+    lobbyId: string;
+    roomId: string;
+    actorId: string;
+    data: PresenceData;
+  }): void {
+    const { event, lobbyId, roomId, actorId, data } = message;
+
+    const presenceEvent: LobbyPresenceEvent = {
+      lobbyId,
+      roomId,
+      actorId,
+      data,
+    };
+
+    // Emit lobby-specific event (e.g., "lobby:active-trips:presence:join")
+    const eventKey = `lobby:${lobbyId}:presence:${event}`;
+    this._emitEvent(eventKey, presenceEvent);
+
+    // Also emit generic lobby presence event
+    this._emitEvent(`lobbyPresence:${event}`, presenceEvent);
+  }
+
+  private _handleLobbySubscribed(message: {
+    lobbyId: string;
+    presence: LobbyPresenceState;
+  }): void {
+    this._log("Subscribed to lobby:", message.lobbyId);
+    // Emit for lobby.subscribe() promise
+    this._emitEvent(`lobbySubscribed:${message.lobbyId}`, message.presence);
+  }
+
+  private _handleLobbyPresenceList(message: {
+    lobbyId: string;
+    presence: LobbyPresenceState;
+  }): void {
+    // Emit for lobby.fetchPresence() promise
+    this._emitEvent(`lobbyPresenceList:${message.lobbyId}`, message.presence);
   }
 
   private _scheduleReconnect(): void {
@@ -812,10 +969,194 @@ class Room implements RoomContext {
     this._client.off(this._fullTopic(topic), handler as EventHandler);
     return this;
   }
+
+  // Room-level presence methods
+
+  /**
+   * Set presence in this room (auto-propagates to lobbies containing this room)
+   */
+  setPresence(data: PresenceData, callback?: AckCallback): void {
+    if (!this._client.connected) {
+      callback?.(new Error("Not connected"));
+      return;
+    }
+
+    // Send presence with roomId for room-scoped presence
+    (this._client as any)._send({
+      type: "presence",
+      roomId: this._room,
+      data,
+    });
+    callback?.(null);
+  }
+
+  /**
+   * Get local cache of presence for this room
+   */
+  getPresence(): Record<string, ActorPresence> {
+    // Return presence map as object keyed by actorTokenId
+    const presenceMap = (this._client as any)._presenceMap as Map<string, ActorPresence>;
+    const result: Record<string, ActorPresence> = {};
+    presenceMap.forEach((value, key) => {
+      result[key] = value;
+    });
+    return result;
+  }
+
+  /**
+   * Fetch presence for this room from server
+   */
+  fetchPresence(): Promise<ActorPresence[]> {
+    return new Promise((resolve, reject) => {
+      if (!this._client.connected) {
+        reject(new Error("Not connected"));
+        return;
+      }
+
+      // Set up one-time handler for presence list response
+      const handler = (presenceList: ActorPresence[], roomId?: string) => {
+        if (roomId === this._room || !roomId) {
+          this._client.off("presenceList", handler as EventHandler);
+          resolve(presenceList);
+        }
+      };
+      this._client.on("presenceList" as any, handler as any);
+
+      (this._client as any)._send({ type: "getPresence", roomId: this._room });
+
+      // Timeout after 5 seconds
+      setTimeout(() => {
+        this._client.off("presenceList", handler as EventHandler);
+        reject(new Error("Presence request timeout"));
+      }, 5000);
+    });
+  }
 }
 
 /**
- * App - Intermediate context for setting the room
+ * Lobby - Scoped context for observing presence across rooms in a lobby
+ *
+ * Lobbies are read-only - you can only observe presence, not publish to them.
+ */
+class Lobby implements LobbyContext {
+  constructor(
+    private _client: NoLag,
+    private _lobbyId: string
+  ) {}
+
+  get lobbyId(): string {
+    return this._lobbyId;
+  }
+
+  /**
+   * Subscribe to this lobby's presence events.
+   * Returns a snapshot of current presence when subscription completes.
+   */
+  subscribe(callback?: AckCallback): Promise<LobbyPresenceState> {
+    return new Promise((resolve, reject) => {
+      if (!this._client.connected) {
+        const err = new Error("Not connected");
+        callback?.(err);
+        reject(err);
+        return;
+      }
+
+      // Set up one-time handler for lobby subscribed response
+      const handler = (presence: LobbyPresenceState) => {
+        this._client.off(`lobbySubscribed:${this._lobbyId}`, handler as EventHandler);
+        callback?.(null);
+        resolve(presence);
+      };
+      this._client.on(`lobbySubscribed:${this._lobbyId}` as any, handler as any);
+
+      (this._client as any)._send({
+        type: "lobbySubscribe",
+        lobbyId: this._lobbyId,
+      });
+
+      // Timeout after 10 seconds
+      setTimeout(() => {
+        this._client.off(`lobbySubscribed:${this._lobbyId}`, handler as EventHandler);
+        const err = new Error("Lobby subscription timeout");
+        callback?.(err);
+        reject(err);
+      }, 10000);
+    });
+  }
+
+  /**
+   * Unsubscribe from this lobby's presence events
+   */
+  unsubscribe(callback?: AckCallback): void {
+    if (!this._client.connected) {
+      callback?.(new Error("Not connected"));
+      return;
+    }
+
+    (this._client as any)._send({
+      type: "lobbyUnsubscribe",
+      lobbyId: this._lobbyId,
+    });
+    callback?.(null);
+  }
+
+  /**
+   * Fetch current presence state for the lobby
+   */
+  fetchPresence(): Promise<LobbyPresenceState> {
+    return new Promise((resolve, reject) => {
+      if (!this._client.connected) {
+        reject(new Error("Not connected"));
+        return;
+      }
+
+      // Set up one-time handler for lobby presence list response
+      const handler = (presence: LobbyPresenceState) => {
+        this._client.off(`lobbyPresenceList:${this._lobbyId}`, handler as EventHandler);
+        resolve(presence);
+      };
+      this._client.on(`lobbyPresenceList:${this._lobbyId}` as any, handler as any);
+
+      (this._client as any)._send({
+        type: "getLobbyPresence",
+        lobbyId: this._lobbyId,
+      });
+
+      // Timeout after 10 seconds
+      setTimeout(() => {
+        this._client.off(`lobbyPresenceList:${this._lobbyId}`, handler as EventHandler);
+        reject(new Error("Lobby presence request timeout"));
+      }, 10000);
+    });
+  }
+
+  /**
+   * Listen for presence events in this lobby (includes room context)
+   */
+  on(event: "presence:join", handler: LobbyPresenceHandler): this;
+  on(event: "presence:leave", handler: LobbyPresenceHandler): this;
+  on(event: "presence:update", handler: LobbyPresenceHandler): this;
+  on(event: string, handler: LobbyPresenceHandler): this {
+    // Map event names to internal event keys
+    const eventType = event.replace("presence:", "");
+    const eventKey = `lobby:${this._lobbyId}:presence:${eventType}`;
+    this._client.on(eventKey, handler as EventHandler);
+    return this;
+  }
+
+  /**
+   * Remove presence event handler
+   */
+  off(event: string, handler?: LobbyPresenceHandler): this {
+    const eventType = event.replace("presence:", "");
+    const eventKey = `lobby:${this._lobbyId}:presence:${eventType}`;
+    this._client.off(eventKey, handler as EventHandler);
+    return this;
+  }
+}
+
+/**
+ * App - Intermediate context for setting the room or lobby
  */
 class App implements AppContext {
   constructor(
@@ -825,6 +1166,10 @@ class App implements AppContext {
 
   setRoom(room: string): RoomContext {
     return new Room(this._client, this._app, room);
+  }
+
+  setLobby(lobby: string): LobbyContext {
+    return new Lobby(this._client, lobby);
   }
 }
 

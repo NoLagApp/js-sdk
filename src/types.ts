@@ -59,10 +59,21 @@ export type PresenceData = Record<string, unknown>;
 // Actor presence info
 export interface ActorPresence {
   actorTokenId: string;
-  actorType: ActorType;
+  actorType?: ActorType;
   presence: PresenceData;
   joinedAt?: number;
 }
+
+// Lobby presence event (includes room context)
+export interface LobbyPresenceEvent {
+  lobbyId: string;
+  roomId: string;
+  actorId: string;
+  data: PresenceData;
+}
+
+// Lobby presence state (keyed by roomId -> actorId -> presence)
+export type LobbyPresenceState = Record<string, Record<string, PresenceData>>;
 
 // Event types
 export type NoLagEventType =
@@ -72,13 +83,35 @@ export type NoLagEventType =
   | "error"
   | "presence:join"
   | "presence:leave"
-  | "presence:update";
+  | "presence:update"
+  | "replay:start"
+  | "replay:end";
 
 // Message metadata
 export interface MessageMeta {
   from?: string;      // sender actorTokenId
   timestamp?: number; // server timestamp
+  /** Whether this message is being replayed (from history) */
+  isReplay?: boolean;
+  /** Unique message ID (for ACK) */
+  msgId?: string;
 }
+
+// Replay start event data
+export interface ReplayStartEvent {
+  count: number;
+  oldestTimestamp?: string;
+  newestTimestamp?: string;
+}
+
+// Replay end event data
+export interface ReplayEndEvent {
+  replayed: number;
+}
+
+// Replay event handlers
+export type ReplayStartHandler = (event: ReplayStartEvent) => void;
+export type ReplayEndHandler = (event: ReplayEndEvent) => void;
 
 // Subscribe options
 export interface SubscribeOptions {
@@ -125,6 +158,7 @@ export type DisconnectHandler = (reason: string) => void;
 export type ReconnectHandler = () => void;
 export type ErrorHandler = (error: Error) => void;
 export type PresenceHandler = (actor: ActorPresence) => void;
+export type LobbyPresenceHandler = (event: LobbyPresenceEvent) => void;
 export type MessageHandler = (data: unknown, meta: MessageMeta) => void;
 export type AckCallback = (error: Error | null) => void;
 
@@ -132,6 +166,9 @@ export type AckCallback = (error: Error | null) => void;
 export interface AppContext {
   /** Set the room within this app */
   setRoom(room: string): RoomContext;
+
+  /** Set the lobby within this app (for presence observation) */
+  setLobby(lobby: string): LobbyContext;
 }
 
 // Room context for fluent API
@@ -155,4 +192,39 @@ export interface RoomContext {
 
   /** Remove message handler for a topic in this room */
   off(topic: string, handler?: MessageHandler): RoomContext;
+
+  /** Set presence in this room (auto-propagates to lobbies) */
+  setPresence(data: PresenceData, callback?: AckCallback): void;
+
+  /** Get presence for this room */
+  getPresence(): Record<string, ActorPresence>;
+
+  /** Fetch presence for this room from server */
+  fetchPresence(): Promise<ActorPresence[]>;
+}
+
+// Lobby context for fluent API (presence observation only)
+export interface LobbyContext {
+  /** The lobby ID */
+  readonly lobbyId: string;
+
+  /**
+   * Subscribe to this lobby's presence events.
+   * Returns a snapshot of current presence when subscription completes.
+   */
+  subscribe(callback?: AckCallback): Promise<LobbyPresenceState>;
+
+  /** Unsubscribe from this lobby's presence events */
+  unsubscribe(callback?: AckCallback): void;
+
+  /** Fetch current presence state for the lobby */
+  fetchPresence(): Promise<LobbyPresenceState>;
+
+  /** Listen for presence events in this lobby (includes room context) */
+  on(event: "presence:join", handler: LobbyPresenceHandler): LobbyContext;
+  on(event: "presence:leave", handler: LobbyPresenceHandler): LobbyContext;
+  on(event: "presence:update", handler: LobbyPresenceHandler): LobbyContext;
+
+  /** Remove presence event handler */
+  off(event: string, handler?: LobbyPresenceHandler): LobbyContext;
 }
