@@ -55,7 +55,7 @@ type EventHandler =
   | ReplayEndHandler;
 
 // Internal options type with token included
-interface InternalOptions extends Required<Omit<NoLagOptions, 'loadBalanceGroup' | 'actorTokenId' | 'heartbeatInterval'>> {
+interface InternalOptions extends Required<Omit<NoLagOptions, 'loadBalanceGroup' | 'actorTokenId' | 'heartbeatInterval' | 'ackBatchInterval'>> {
   token: string;
   actorTokenId?: string;
   loadBalanceGroup?: string;
@@ -119,7 +119,7 @@ export class NoLag {
   // ACK batching
   private _pendingAcks: string[] = [];
   private _ackTimer: ReturnType<typeof setTimeout> | null = null;
-  private _ackBatchInterval = 100; // ms
+  private _ackBatchInterval = 0; // ms (default: immediate ACKs)
 
   // Event handlers (local - for routing messages to callbacks)
   private _eventHandlers: Map<string, Set<EventHandler>> = new Map();
@@ -144,6 +144,7 @@ export class NoLag {
       loadBalanceGroup: options?.loadBalanceGroup,
       heartbeatInterval: options?.heartbeatInterval ?? DEFAULT_HEARTBEAT_INTERVAL,
     };
+    this._ackBatchInterval = options?.ackBatchInterval ?? 0;
 
     // Set up visibility change handler for browser
     if (typeof document !== "undefined" && this._options.disconnectOnHidden) {
@@ -768,8 +769,10 @@ export class NoLag {
   private _queueAck(msgId: string): void {
     this._pendingAcks.push(msgId);
 
-    // Debounce ACK sending
-    if (!this._ackTimer) {
+    // Send immediately if no batching, otherwise debounce
+    if (this._ackBatchInterval === 0) {
+      this._flushAcks();
+    } else if (!this._ackTimer) {
       this._ackTimer = setTimeout(() => {
         this._flushAcks();
       }, this._ackBatchInterval);

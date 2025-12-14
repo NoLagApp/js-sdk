@@ -38,6 +38,13 @@ export interface NoLagOptions {
    * If not specified, uses the actor token ID as the group.
    */
   loadBalanceGroup?: string;
+  /**
+   * ACK batch interval in milliseconds.
+   * When > 0, ACKs are batched and sent together after this delay.
+   * Set to 0 for immediate ACKs (lowest latency).
+   * (default: 0)
+   */
+  ackBatchInterval?: number;
 }
 
 // Connection status
