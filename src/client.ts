@@ -450,6 +450,33 @@ export class NoLag {
   }
 
   /**
+   * Acknowledge receipt of a message
+   *
+   * Note: ACKs are automatically sent when messages have `requiresAck: true`.
+   * Use this method for manual ACK scenarios.
+   */
+  ack(msgId: string): void {
+    if (!this.connected || !this._ws) {
+      this._log("Cannot ACK, not connected");
+      return;
+    }
+    this._queueAck(msgId);
+  }
+
+  /**
+   * Acknowledge multiple messages at once
+   */
+  batchAck(msgIds: string[]): void {
+    if (!this.connected || !this._ws) {
+      this._log("Cannot ACK, not connected");
+      return;
+    }
+    for (const msgId of msgIds) {
+      this._queueAck(msgId);
+    }
+  }
+
+  /**
    * Emit/publish to a topic
    */
   emit(
