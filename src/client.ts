@@ -102,6 +102,7 @@ export class NoLag {
   private _reconnectAttempts = 0;
   private _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private _heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private _isReconnecting = false; // True when reconnecting after disconnect, false on fresh connect
 
   // Actor info (populated after auth)
   private _actorTokenId: string | null = null;
@@ -239,6 +240,9 @@ export class NoLag {
             .then((restoredSubscriptions) => {
               this._status = "connected";
               this._reconnectAttempts = 0;
+              // Reset reconnecting flag after successful connection
+              // Next connect() call will be a fresh connect unless scheduled via _scheduleReconnect
+              this._isReconnecting = false;
               this._log("Connected and authenticated");
 
               if (restoredSubscriptions && restoredSubscriptions.length > 0) {
@@ -424,12 +428,18 @@ export class NoLag {
 
     this._log("Subscribing to:", topic, loadBalance ? "(load balanced)" : "");
 
-    this._send({
+    // Only include loadBalance fields when actually using load balancing
+    const subscribeMessage: { type: string; topic: string; loadBalance?: boolean; loadBalanceGroup?: string } = {
       type: "subscribe",
       topic,
-      loadBalance,
-      loadBalanceGroup,
-    });
+    };
+    if (loadBalance) {
+      subscribeMessage.loadBalance = true;
+      if (loadBalanceGroup) {
+        subscribeMessage.loadBalanceGroup = loadBalanceGroup;
+      }
+    }
+    this._send(subscribeMessage);
 
     cb?.(null);
   }
@@ -602,10 +612,16 @@ export class NoLag {
       // Temporarily store handler
       (this as any)._authHandler = authHandler;
 
-      this._send({
+      // Only include reconnect flag when true (reconnecting after disconnect)
+      // Absence of reconnect flag = fresh connect (no subscription restoration)
+      const authMessage: { type: string; token: string; reconnect?: boolean } = {
         type: "auth",
         token: this._options.token,
-      });
+      };
+      if (this._isReconnecting) {
+        authMessage.reconnect = true;
+      }
+      this._send(authMessage);
     });
   }
 
@@ -886,6 +902,8 @@ export class NoLag {
 
     this._reconnectTimer = setTimeout(() => {
       this._reconnectTimer = null;
+      // Set flag so server knows to restore subscriptions
+      this._isReconnecting = true;
       this.connect().catch((err) => {
         this._log("Reconnection failed:", err);
       });
