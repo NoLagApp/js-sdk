@@ -15,6 +15,10 @@ export type { WebSocketFactory, IUnifiedWebSocket } from "./websocket/types";
 export { NoLagApi, NoLagApiError } from "./api";
 export * from "./api-types";
 
+// Export WebRTC module
+export { WebRTCManager } from "./webrtc";
+export type { WebRTCOptions, WebRTCEvent, WebRTCEvents } from "./webrtc";
+
 /**
  * Create a NoLag client for Node.js
  */

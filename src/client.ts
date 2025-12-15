@@ -810,10 +810,21 @@ export class NoLag {
     this._ackTimer = null;
   }
 
-  private _handlePresenceEvent(message: { event: string; data: ActorPresence }): void {
-    const { event, data } = message;
+  private _handlePresenceEvent(message: { event: string; data: ActorPresence | { actor_token_id: string; presence: PresenceData; joined_at?: number } }): void {
+    const { event, data: rawData } = message;
 
-    if (!data || !data.actorTokenId) return;
+    if (!rawData) return;
+
+    // Normalize snake_case to camelCase (Kraken sends snake_case)
+    const data: ActorPresence = {
+      actorTokenId: (rawData as any).actorTokenId || (rawData as any).actor_token_id,
+      presence: rawData.presence,
+      joinedAt: (rawData as any).joinedAt || (rawData as any).joined_at,
+    };
+
+    if (!data.actorTokenId) {
+      return;
+    }
 
     switch (event) {
       case "join":
