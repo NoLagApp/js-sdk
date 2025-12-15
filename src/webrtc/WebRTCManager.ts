@@ -4,7 +4,12 @@
  * Provides peer-to-peer video/audio connections using NoLag as the signaling server.
  * Uses the "Perfect Negotiation" pattern to handle offer collisions gracefully.
  *
- * @example
+ * Works in both browser and Node.js environments. In Node.js, requires the 'wrtc' package:
+ * ```bash
+ * npm install wrtc
+ * ```
+ *
+ * @example Browser
  * ```typescript
  * const client = NoLag(token);
  * await client.connect();
@@ -24,6 +29,26 @@
  *
  * await webrtc.start();
  * ```
+ *
+ * @example Node.js (AI Voice Bot)
+ * ```typescript
+ * import { NoLag, WebRTCManager } from '@nolag/js-sdk';
+ * import wrtc from 'wrtc';
+ *
+ * const client = NoLag(token);
+ * await client.connect();
+ *
+ * const webrtc = new WebRTCManager(client, {
+ *   app: 'video-chat',
+ *   room: 'meeting-123'
+ * });
+ *
+ * webrtc.on('peerConnected', (actorId, stream) => {
+ *   // Process incoming audio with speech-to-text
+ * });
+ *
+ * await webrtc.start();
+ * ```
  */
 
 import type { NoLag } from "../client";
@@ -36,6 +61,13 @@ import type {
   CandidateMessage,
   WebRTCEvent,
 } from "./types";
+import {
+  getRTCPeerConnection,
+  getMediaStream,
+  isWebRTCAvailable,
+  isBrowser,
+  isNode,
+} from "./environment";
 
 // Default STUN servers (free, public)
 const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
@@ -70,6 +102,19 @@ export class WebRTCManager {
   } = {};
 
   constructor(client: NoLag, options: WebRTCOptions) {
+    // Verify WebRTC is available in this environment
+    if (!isWebRTCAvailable()) {
+      if (isNode()) {
+        throw new Error(
+          "WebRTC is not available. Install the 'wrtc' package: npm install wrtc"
+        );
+      } else {
+        throw new Error(
+          "WebRTC is not available in this browser. Please use a modern browser with WebRTC support."
+        );
+      }
+    }
+
     this._client = client;
     this._options = {
       iceServers: options.iceServers ?? DEFAULT_ICE_SERVERS,
@@ -367,7 +412,9 @@ export class WebRTCManager {
       iceServers: this._options.iceServers,
     };
 
-    const pc = new RTCPeerConnection(config);
+    // Get RTCPeerConnection for current environment (browser or Node.js with wrtc)
+    const RTCPeerConnectionImpl = getRTCPeerConnection();
+    const pc = new RTCPeerConnectionImpl(config);
 
     // Determine politeness for perfect negotiation
     // Lower actorId is "polite" and will yield on collision
@@ -397,7 +444,12 @@ export class WebRTCManager {
 
     // Handle remote tracks
     pc.ontrack = ({ track, streams }) => {
-      const stream = streams[0] || new MediaStream([track]);
+      let stream = streams[0];
+      if (!stream) {
+        // Create MediaStream for current environment (browser or Node.js with wrtc)
+        const MediaStreamImpl = getMediaStream();
+        stream = new MediaStreamImpl([track]);
+      }
       peerState.remoteStream = stream;
       this._emit("peerTrack", remoteActorId, track, stream);
       this._emit("peerConnected", remoteActorId, stream);
