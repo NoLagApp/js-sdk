@@ -64,6 +64,8 @@ export interface Room {
   description?: string;
   roomType: RoomType;
   isEnabled: boolean;
+  /** Topics available in this room */
+  topics?: string[];
   config?: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
@@ -73,6 +75,8 @@ export interface RoomCreate {
   name: string;
   slug?: string;
   description?: string;
+  /** Topics available in this room (inherits from App if not set) */
+  topics?: string[];
   config?: Record<string, unknown>;
 }
 
@@ -80,6 +84,8 @@ export interface RoomUpdate {
   name?: string;
   description?: string;
   isEnabled?: boolean;
+  /** Topics available in this room */
+  topics?: string[];
   config?: Record<string, unknown>;
 }
 
