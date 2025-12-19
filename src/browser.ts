@@ -8,7 +8,40 @@ import { createWebSocket } from "./websocket/browser";
 import type { NoLagOptions } from "./types";
 
 export { NoLagSocket } from "./client";
-export * from "./types";
+
+// Explicitly re-export all types for better compatibility with NodeNext resolution
+export type {
+  QoS,
+  NoLagOptions,
+  ConnectionStatus,
+  ActorType,
+  Permission,
+  PresenceData,
+  ActorPresence,
+  LobbyPresenceEvent,
+  LobbyPresenceState,
+  NoLagEventType,
+  MessageMeta,
+  ReplayStartEvent,
+  ReplayEndEvent,
+  ReplayStartHandler,
+  ReplayEndHandler,
+  SubscribeOptions,
+  EmitOptions,
+  RestoredSubscription,
+  ConnectHandler,
+  DisconnectHandler,
+  ReconnectHandler,
+  ErrorHandler,
+  PresenceHandler,
+  LobbyPresenceHandler,
+  MessageHandler,
+  AckCallback,
+  AppContext,
+  RoomContext,
+  LobbyContext,
+} from "./types";
+
 export type { WebSocketFactory, IUnifiedWebSocket } from "./websocket/types";
 
 // Export REST API client
