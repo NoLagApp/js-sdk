@@ -45,6 +45,13 @@ export interface NoLagOptions {
    * (default: 0)
    */
   ackBatchInterval?: number;
+  /**
+   * Project ID for debug logging.
+   * When provided, connection attempts and rejections will be logged
+   * with this project ID, making them visible in the Event Logs dashboard.
+   * This is only used for logging purposes and does not affect authorization.
+   */
+  projectId?: string;
 }
 
 // Connection status

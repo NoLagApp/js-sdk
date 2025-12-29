@@ -55,12 +55,13 @@ type EventHandler =
   | ReplayEndHandler;
 
 // Internal options type with token included
-interface InternalOptions extends Required<Omit<NoLagOptions, 'loadBalanceGroup' | 'actorTokenId' | 'heartbeatInterval' | 'ackBatchInterval'>> {
+interface InternalOptions extends Required<Omit<NoLagOptions, 'loadBalanceGroup' | 'actorTokenId' | 'heartbeatInterval' | 'ackBatchInterval' | 'projectId'>> {
   token: string;
   actorTokenId?: string;
   loadBalanceGroup?: string;
   maxReconnectAttempts: number;
   heartbeatInterval: number;
+  projectId?: string;
 }
 
 /**
@@ -144,6 +145,7 @@ export class NoLag {
       loadBalance: options?.loadBalance ?? false,
       loadBalanceGroup: options?.loadBalanceGroup,
       heartbeatInterval: options?.heartbeatInterval ?? DEFAULT_HEARTBEAT_INTERVAL,
+      projectId: options?.projectId,
     };
     this._ackBatchInterval = options?.ackBatchInterval ?? 0;
 
@@ -614,12 +616,16 @@ export class NoLag {
 
       // Only include reconnect flag when true (reconnecting after disconnect)
       // Absence of reconnect flag = fresh connect (no subscription restoration)
-      const authMessage: { type: string; token: string; reconnect?: boolean } = {
+      const authMessage: { type: string; token: string; reconnect?: boolean; projectId?: string } = {
         type: "auth",
         token: this._options.token,
       };
       if (this._isReconnecting) {
         authMessage.reconnect = true;
+      }
+      // Include projectId for debug logging (pre-auth events)
+      if (this._options.projectId) {
+        authMessage.projectId = this._options.projectId;
       }
       this._send(authMessage);
     });
