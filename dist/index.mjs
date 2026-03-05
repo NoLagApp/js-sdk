@@ -1977,10 +1977,13 @@ let NoLag$1 = class NoLag {
         const loadBalance = options.loadBalance ?? this._options.loadBalance;
         const loadBalanceGroup = options.loadBalanceGroup ?? this._options.loadBalanceGroup;
         this._log("Subscribing to:", topic, loadBalance ? "(load balanced)" : "");
+        // Use connection-level QoS default, allow per-topic override
+        const qos = options.qos ?? this._options.qos;
         // Only include loadBalance fields when actually using load balancing
         const subscribeMessage = {
             type: "subscribe",
             topic,
+            qos,
         };
         if (loadBalance) {
             subscribeMessage.loadBalance = true;

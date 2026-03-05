@@ -430,10 +430,14 @@ export class NoLag {
 
     this._log("Subscribing to:", topic, loadBalance ? "(load balanced)" : "");
 
+    // Use connection-level QoS default, allow per-topic override
+    const qos = options.qos ?? this._options.qos;
+
     // Only include loadBalance fields when actually using load balancing
-    const subscribeMessage: { type: string; topic: string; loadBalance?: boolean; loadBalanceGroup?: string } = {
+    const subscribeMessage: { type: string; topic: string; qos: QoS; loadBalance?: boolean; loadBalanceGroup?: string } = {
       type: "subscribe",
       topic,
+      qos,
     };
     if (loadBalance) {
       subscribeMessage.loadBalance = true;
