@@ -109,6 +109,8 @@ export interface MessageMeta {
   isReplay?: boolean;
   /** Unique message ID (for ACK) */
   msgId?: string;
+  /** Filter value this message was published with (if any) */
+  filter?: string;
 }
 
 // Replay start event data
@@ -141,6 +143,14 @@ export interface SubscribeOptions {
    * If not specified, uses the connection-level loadBalanceGroup setting.
    */
   loadBalanceGroup?: string;
+  /**
+   * Filter values for this subscription.
+   * Each filter maps to a sub-topic in MQTT, so only messages published
+   * with a matching filter are delivered.
+   * Without filters, subscribes to all messages on the topic (wildcard).
+   * Max 100 filters per topic. Values must not contain '/', '#', or '+'.
+   */
+  filters?: string[];
 }
 
 // Emit options
@@ -154,6 +164,13 @@ export interface EmitOptions {
    * (default: true - you will receive your own messages)
    */
   echo?: boolean;
+  /**
+   * Filter value for this publish.
+   * Routes the message to subscribers with this specific filter.
+   * Subscribers without filters (wildcard) will NOT receive filtered publishes.
+   * Must not contain '/', '#', or '+'.
+   */
+  filter?: string;
 }
 
 // Restored subscription info (received from server on reconnect)
@@ -164,6 +181,8 @@ export interface RestoredSubscription {
   loadBalance?: boolean;
   /** Load balance group name */
   loadBalanceGroup?: string;
+  /** Active filters for this subscription */
+  filters?: string[];
 }
 
 // Event handlers
@@ -206,6 +225,15 @@ export interface RoomContext {
 
   /** Remove message handler for a topic in this room */
   off(topic: string, handler?: MessageHandler): RoomContext;
+
+  /** Replace all filters for a topic in this room */
+  setFilters(topic: string, filters: string[], callback?: AckCallback): void;
+
+  /** Add filters to existing filters for a topic in this room */
+  addFilters(topic: string, filters: string[], callback?: AckCallback): void;
+
+  /** Remove specific filters from a topic in this room */
+  removeFilters(topic: string, filters: string[], callback?: AckCallback): void;
 
   /** Set presence in this room (auto-propagates to lobbies) */
   setPresence(data: PresenceData, callback?: AckCallback): void;
