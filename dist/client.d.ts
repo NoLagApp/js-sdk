@@ -58,6 +58,7 @@ export declare class NoLag {
     private _pendingAcks;
     private _ackTimer;
     private _ackBatchInterval;
+    private _topicFilters;
     private _eventHandlers;
     constructor(createWebSocket: WebSocketFactory, token: string, options?: NoLagOptions);
     get status(): ConnectionStatus;
@@ -122,6 +123,22 @@ export declare class NoLag {
      * This also removes the subscription from server-side persistence.
      */
     unsubscribe(topic: string, callback?: AckCallback): void;
+    /**
+     * Replace all filters for a topic.
+     * Sends a setFilters message to the server which handles subscribe/unsubscribe diffs.
+     * Empty array switches back to wildcard (receive all messages).
+     */
+    setFilters(topic: string, filters: string[], callback?: AckCallback): void;
+    /**
+     * Add filters to the existing set for a topic.
+     * Merges with current filters and sends the full set to the server.
+     */
+    addFilters(topic: string, filters: string[], callback?: AckCallback): void;
+    /**
+     * Remove specific filters from a topic.
+     * Removes from current set and sends the remaining filters to the server.
+     */
+    removeFilters(topic: string, filters: string[], callback?: AckCallback): void;
     /**
      * Acknowledge receipt of a message
      *

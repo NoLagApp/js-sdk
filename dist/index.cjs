@@ -1753,6 +1753,8 @@ let NoLag$1 = class NoLag {
         this._pendingAcks = [];
         this._ackTimer = null;
         this._ackBatchInterval = 0; // ms (default: immediate ACKs)
+        // Topic filters tracking (topic -> set of filter values)
+        this._topicFilters = new Map();
         // Event handlers (local - for routing messages to callbacks)
         this._eventHandlers = new Map();
         this._createWebSocket = createWebSocket;
@@ -1995,6 +1997,12 @@ let NoLag$1 = class NoLag {
                 subscribeMessage.loadBalanceGroup = loadBalanceGroup;
             }
         }
+        // Include filters if provided
+        const filters = options.filters;
+        if (filters && filters.length > 0) {
+            subscribeMessage.filters = filters;
+            this._topicFilters.set(topic, new Set(filters));
+        }
         this._send(subscribeMessage);
         cb?.(null);
     }
@@ -2011,6 +2019,52 @@ let NoLag$1 = class NoLag {
         this._log("Unsubscribing from:", topic);
         this._send({ type: "unsubscribe", topic });
         callback?.(null);
+    }
+    /**
+     * Replace all filters for a topic.
+     * Sends a setFilters message to the server which handles subscribe/unsubscribe diffs.
+     * Empty array switches back to wildcard (receive all messages).
+     */
+    setFilters(topic, filters, callback) {
+        if (!this.connected || !this._ws) {
+            callback?.(new Error("Not connected"));
+            return;
+        }
+        this._log("Setting filters for:", topic, filters);
+        if (filters.length > 0) {
+            this._topicFilters.set(topic, new Set(filters));
+        }
+        else {
+            this._topicFilters.delete(topic);
+        }
+        this._send({ type: "setFilters", topic, filters });
+        callback?.(null);
+    }
+    /**
+     * Add filters to the existing set for a topic.
+     * Merges with current filters and sends the full set to the server.
+     */
+    addFilters(topic, filters, callback) {
+        const existing = this._topicFilters.get(topic) || new Set();
+        for (const f of filters) {
+            existing.add(f);
+        }
+        this.setFilters(topic, Array.from(existing), callback);
+    }
+    /**
+     * Remove specific filters from a topic.
+     * Removes from current set and sends the remaining filters to the server.
+     */
+    removeFilters(topic, filters, callback) {
+        const existing = this._topicFilters.get(topic);
+        if (!existing) {
+            callback?.(null);
+            return;
+        }
+        for (const f of filters) {
+            existing.delete(f);
+        }
+        this.setFilters(topic, Array.from(existing), callback);
     }
     /**
      * Acknowledge receipt of a message
@@ -2049,13 +2103,17 @@ let NoLag$1 = class NoLag {
         const options = typeof optionsOrCallback === "object" ? optionsOrCallback : {};
         const ackCb = typeof optionsOrCallback === "function" ? optionsOrCallback : callback;
         this._log("Emitting to:", topic, data);
-        this._send({
+        const publishMessage = {
             type: "publish",
             topic,
             data,
             qos: options.qos ?? this._options.qos,
             echo: options.echo ?? true,
-        });
+        };
+        if (options.filter) {
+            publishMessage.filter = options.filter;
+        }
+        this._send(publishMessage);
         ackCb?.(null);
     }
     on(event, handler) {
@@ -2212,6 +2270,10 @@ let NoLag$1 = class NoLag {
                 break;
             case "unsubscribed":
                 this._log("Unsubscribed from:", message.topic);
+                this._topicFilters.delete(message.topic);
+                break;
+            case "filtersUpdated":
+                this._log("Filters updated for:", message.topic, message.filters);
                 break;
             case "replayStart":
                 this._handleReplayStart(message);
@@ -2228,11 +2290,14 @@ let NoLag$1 = class NoLag {
         }
     }
     _handleTopicMessage(message) {
-        const { topic, data, isReplay, msgId, requiresAck } = message;
+        const { topic, data, isReplay, msgId, requiresAck, filter } = message;
         const meta = {
             isReplay: isReplay ?? this._isReplaying,
             msgId,
         };
+        if (filter) {
+            meta.filter = filter;
+        }
         // Track replay progress
         if (this._replayInfo && meta.isReplay) {
             this._replayInfo.received++;
@@ -2463,6 +2528,16 @@ class Room {
     off(topic, handler) {
         this._client.off(this._fullTopic(topic), handler);
         return this;
+    }
+    // Room-level filter methods
+    setFilters(topic, filters, callback) {
+        this._client.setFilters(this._fullTopic(topic), filters, callback);
+    }
+    addFilters(topic, filters, callback) {
+        this._client.addFilters(this._fullTopic(topic), filters, callback);
+    }
+    removeFilters(topic, filters, callback) {
+        this._client.removeFilters(this._fullTopic(topic), filters, callback);
     }
     // Room-level presence methods
     /**
