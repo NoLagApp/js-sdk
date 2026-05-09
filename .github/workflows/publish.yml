@@ -1,0 +1,47 @@
+name: Publish to npm
+
+on:
+  workflow_dispatch:
+
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Run tests
+        run: npm test
+
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          PUBLISHED=$(npm view "@nolag/js-sdk@$PKG_VERSION" version 2>/dev/null || echo "")
+
+          if [ "$PUBLISHED" = "$PKG_VERSION" ]; then
+            echo "⏭ @nolag/js-sdk@$PKG_VERSION already published, skipping"
+          else
+            npm publish --provenance --access public
+            echo "✓ @nolag/js-sdk@$PKG_VERSION published"
+          fi
