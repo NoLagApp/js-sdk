@@ -148,9 +148,14 @@ export interface SubscribeOptions {
    * Each filter maps to a sub-topic in MQTT, so only messages published
    * with a matching filter are delivered.
    * Without filters, subscribes to all messages on the topic (wildcard).
-   * Max 100 filters per topic. Values must not contain '/', '#', or '+'.
+   * Max 100 filters per topic. Values must not contain '/', '#', '+', or '|'.
+   *
+   * Supports AND logic via nested arrays:
+   * - `['alice', 'bob']` → OR: matches alice OR bob
+   * - `[['alice', 'admin']]` → AND: matches messages tagged with both alice AND admin
+   * - `[['alice', 'admin'], 'bob']` → (alice AND admin) OR bob
    */
-  filters?: string[];
+  filters?: (string | string[])[];
 }
 
 // Emit options
@@ -168,9 +173,16 @@ export interface EmitOptions {
    * Filter value for this publish.
    * Routes the message to subscribers with this specific filter.
    * Subscribers without filters (wildcard) will NOT receive filtered publishes.
-   * Must not contain '/', '#', or '+'.
+   * Must not contain '/', '#', '+', or '|'.
    */
   filter?: string;
+  /**
+   * AND composite filter for this publish.
+   * Publishes to a composite filter topic (values are sorted, lowercased, joined with '|' server-side).
+   * Example: `['admin', 'alice']` publishes to the `admin|alice` composite topic.
+   * `filter` takes precedence if both are provided.
+   */
+  filters?: string[];
 }
 
 // Restored subscription info (received from server on reconnect)

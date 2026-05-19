@@ -123,8 +123,8 @@ export class NoLag {
   private _ackTimer: ReturnType<typeof setTimeout> | null = null;
   private _ackBatchInterval = 0; // ms (default: immediate ACKs)
 
-  // Topic filters tracking (topic -> set of filter values)
-  private _topicFilters: Map<string, Set<string>> = new Map();
+  // Topic filters tracking (topic -> mixed filter array with OR strings and AND groups)
+  private _topicFilters: Map<string, (string | string[])[]> = new Map();
 
   // Event handlers (local - for routing messages to callbacks)
   private _eventHandlers: Map<string, Set<EventHandler>> = new Map();
@@ -437,7 +437,7 @@ export class NoLag {
     const qos = options.qos ?? this._options.qos;
 
     // Only include loadBalance fields when actually using load balancing
-    const subscribeMessage: { type: string; topic: string; qos: QoS; loadBalance?: boolean; loadBalanceGroup?: string; filters?: string[] } = {
+    const subscribeMessage: { type: string; topic: string; qos: QoS; loadBalance?: boolean; loadBalanceGroup?: string; filters?: (string | string[])[] } = {
       type: "subscribe",
       topic,
       qos,
@@ -448,11 +448,11 @@ export class NoLag {
         subscribeMessage.loadBalanceGroup = loadBalanceGroup;
       }
     }
-    // Include filters if provided
+    // Include filters if provided (supports mixed arrays with AND groups)
     const filters = options.filters;
     if (filters && filters.length > 0) {
       subscribeMessage.filters = filters;
-      this._topicFilters.set(topic, new Set(filters));
+      this._topicFilters.set(topic, [...filters]);
     }
     this._send(subscribeMessage);
 
@@ -480,7 +480,7 @@ export class NoLag {
    * Sends a setFilters message to the server which handles subscribe/unsubscribe diffs.
    * Empty array switches back to wildcard (receive all messages).
    */
-  setFilters(topic: string, filters: string[], callback?: AckCallback): void {
+  setFilters(topic: string, filters: (string | string[])[], callback?: AckCallback): void {
     if (!this.connected || !this._ws) {
       callback?.(new Error("Not connected"));
       return;
@@ -489,7 +489,7 @@ export class NoLag {
     this._log("Setting filters for:", topic, filters);
 
     if (filters.length > 0) {
-      this._topicFilters.set(topic, new Set(filters));
+      this._topicFilters.set(topic, [...filters]);
     } else {
       this._topicFilters.delete(topic);
     }
@@ -503,11 +503,22 @@ export class NoLag {
    * Merges with current filters and sends the full set to the server.
    */
   addFilters(topic: string, filters: string[], callback?: AckCallback): void {
-    const existing = this._topicFilters.get(topic) || new Set<string>();
-    for (const f of filters) {
-      existing.add(f);
+    const existing = this._topicFilters.get(topic) || [];
+    // Collect existing simple strings into a set for dedup
+    const simpleSet = new Set<string>();
+    const andGroups: string[][] = [];
+    for (const item of existing) {
+      if (typeof item === "string") {
+        simpleSet.add(item);
+      } else {
+        andGroups.push(item);
+      }
     }
-    this.setFilters(topic, Array.from(existing), callback);
+    for (const f of filters) {
+      simpleSet.add(f);
+    }
+    const merged: (string | string[])[] = [...Array.from(simpleSet), ...andGroups];
+    this.setFilters(topic, merged, callback);
   }
 
   /**
@@ -520,10 +531,12 @@ export class NoLag {
       callback?.(null);
       return;
     }
-    for (const f of filters) {
-      existing.delete(f);
-    }
-    this.setFilters(topic, Array.from(existing), callback);
+    const removeSet = new Set(filters);
+    // Remove matching simple strings, preserve AND groups
+    const remaining = existing.filter(
+      (item) => typeof item !== "string" || !removeSet.has(item)
+    );
+    this.setFilters(topic, remaining, callback);
   }
 
   /**
@@ -573,7 +586,7 @@ export class NoLag {
 
     this._log("Emitting to:", topic, data);
 
-    const publishMessage: { type: string; topic: string; data: unknown; qos: QoS; echo: boolean; filter?: string } = {
+    const publishMessage: { type: string; topic: string; data: unknown; qos: QoS; echo: boolean; filter?: string; filters?: string[] } = {
       type: "publish",
       topic,
       data,
@@ -582,6 +595,8 @@ export class NoLag {
     };
     if (options.filter) {
       publishMessage.filter = options.filter;
+    } else if (options.filters && options.filters.length > 0) {
+      publishMessage.filters = options.filters;
     }
     this._send(publishMessage);
 
@@ -1113,7 +1128,7 @@ class Room implements RoomContext {
 
   // Room-level filter methods
 
-  setFilters(topic: string, filters: string[], callback?: AckCallback): void {
+  setFilters(topic: string, filters: (string | string[])[], callback?: AckCallback): void {
     this._client.setFilters(this._fullTopic(topic), filters, callback);
   }
 
