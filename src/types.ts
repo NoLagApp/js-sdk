@@ -62,7 +62,7 @@ export type ConnectionStatus =
   | "reconnecting";
 
 // Actor types
-export type ActorType = "device" | "user" | "server";
+export type ActorType = "device" | "user" | "server" | "service" | "session" | "agent" | "orchestrator" | "observer";
 
 // Permission types
 export type Permission = "subscribe" | "publish" | "pubSub";
