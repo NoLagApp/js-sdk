@@ -41,7 +41,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/NoLagApp/nolagjs.git"
+    "url": "git+https://github.com/NoLagApp/js-sdk.git"
   },
   "author": "NoLag",
   "license": "MIT",
