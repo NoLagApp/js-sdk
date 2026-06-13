@@ -126,6 +126,36 @@ export interface ActorUpdate {
   externalId?: string;
   metadata?: Record<string, unknown>;
   isActive?: boolean;
+  /** Access scope ID for tenant isolation. Set to null to unscope the actor. */
+  accessScopeId?: string | null;
+}
+
+// ============ Scope Types ============
+
+export interface Scope {
+  accessScopeId: string;
+  projectId: string;
+  slug: string;
+  name: string;
+  description?: string | null;
+  metadata?: Record<string, unknown> | null;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ScopeCreate {
+  slug: string;
+  name: string;
+  description?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface ScopeUpdate {
+  name?: string;
+  description?: string;
+  metadata?: Record<string, unknown>;
+  isActive?: boolean;
 }
 
 // ============ API Options ============

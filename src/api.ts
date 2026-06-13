@@ -23,6 +23,9 @@ import {
   ActorWithToken,
   ActorCreate,
   ActorUpdate,
+  Scope,
+  ScopeCreate,
+  ScopeUpdate,
 } from "./api-types";
 
 const DEFAULT_BASE_URL = "https://api.nolag.app/v1";
@@ -64,6 +67,7 @@ export class NoLagApi {
   readonly apps: AppsApi;
   readonly rooms: RoomsApi;
   readonly actors: ActorsApi;
+  readonly scopes: ScopesApi;
 
   constructor(apiKey: string, options?: NoLagApiOptions) {
     this._apiKey = apiKey;
@@ -75,6 +79,7 @@ export class NoLagApi {
     this.apps = new AppsApi(this);
     this.rooms = new RoomsApi(this);
     this.actors = new ActorsApi(this);
+    this.scopes = new ScopesApi(this);
   }
 
   /**
@@ -315,5 +320,72 @@ class ActorsApi {
    */
   async delete(actorId: string): Promise<void> {
     await this._api.request<void>("DELETE", `/actors/${actorId}`);
+  }
+}
+
+// ============ Scopes API ============
+
+class ScopesApi {
+  constructor(private _api: NoLagApi) {}
+
+  /**
+   * List all access scopes in the project
+   */
+  async list(options?: ListOptions): Promise<PaginatedResult<Scope>> {
+    return this._api.request<PaginatedResult<Scope>>(
+      "GET",
+      "/scopes",
+      undefined,
+      options as Record<string, string | number | undefined>
+    );
+  }
+
+  /**
+   * Get an access scope by ID
+   */
+  async get(scopeId: string): Promise<Scope> {
+    return this._api.request<Scope>("GET", `/scopes/${scopeId}`);
+  }
+
+  /**
+   * Create a new access scope
+   */
+  async create(data: ScopeCreate): Promise<Scope> {
+    return this._api.request<Scope>("POST", "/scopes", data);
+  }
+
+  /**
+   * Update an access scope
+   */
+  async update(scopeId: string, data: ScopeUpdate): Promise<Scope> {
+    return this._api.request<Scope>("PATCH", `/scopes/${scopeId}`, data);
+  }
+
+  /**
+   * Delete an access scope
+   */
+  async delete(scopeId: string): Promise<void> {
+    await this._api.request<void>("DELETE", `/scopes/${scopeId}`);
+  }
+
+  /**
+   * List actors assigned to a scope
+   */
+  async listActors(scopeId: string): Promise<Actor[]> {
+    return this._api.request<Actor[]>("GET", `/scopes/${scopeId}/actors`);
+  }
+
+  /**
+   * Assign an actor to this scope
+   */
+  async addActor(scopeId: string, actorId: string): Promise<Actor> {
+    return this._api.actors.update(actorId, { accessScopeId: scopeId });
+  }
+
+  /**
+   * Remove an actor from this scope (unscope it)
+   */
+  async removeActor(actorId: string): Promise<Actor> {
+    return this._api.actors.update(actorId, { accessScopeId: null });
   }
 }

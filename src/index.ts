@@ -7,6 +7,7 @@ import { NoLag as NoLagClient } from "./client";
 import { createWebSocket } from "./websocket/node";
 import type { NoLagOptions } from "./types";
 
+export { NoLagEncodeError, NoLagServerError } from "./errors";
 export { NoLagSocket } from "./client";
 
 // Explicitly re-export all types for better compatibility with NodeNext resolution

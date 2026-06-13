@@ -7,6 +7,7 @@
  */
 
 import { encode as msgpackEncode, decode as msgpackDecode } from "@msgpack/msgpack";
+import { NoLagEncodeError, NoLagServerError } from "./errors";
 import {
   NoLagOptions,
   ConnectionStatus,
@@ -39,6 +40,9 @@ import {
 import { IUnifiedWebSocket, WebSocketFactory, WS_READY_STATE } from "./websocket/types";
 
 const DEFAULT_URL = "wss://broker.nolag.app/ws";
+/** Protocol v2: loud failures (42940 unknown_topic), published acks, auto-provisioned rooms */
+const PROTOCOL_VERSION = 2;
+const PENDING_OP_TIMEOUT_MS = 10_000;
 const DEFAULT_RECONNECT_INTERVAL = 5000;
 const DEFAULT_MAX_RECONNECT_ATTEMPTS = 10;
 const DEFAULT_HEARTBEAT_INTERVAL = 30000;
@@ -109,6 +113,12 @@ export class NoLag {
   private _actorTokenId: string | null = null;
   private _projectId: string | null = null;
   private _actorType: ActorType | null = null;
+  private _protocolVersion: number = 1;
+
+  // Pending operation tracking: real acks instead of optimistic cb(null)
+  private _pendingSubscribes: Map<string, Array<{ cb: AckCallback; timer: ReturnType<typeof setTimeout> }>> = new Map();
+  private _pendingPublishes: Map<string, { cb: AckCallback; timer: ReturnType<typeof setTimeout> }> = new Map();
+  private _msgRefCounter = 0;
 
   // Presence
   private _presence: PresenceData | null = null;
@@ -202,6 +212,11 @@ export class NoLag {
 
   get loadBalanceGroup(): string | undefined {
     return this._options.loadBalanceGroup;
+  }
+
+  /** Negotiated protocol version (1 against pre-v2 brokers). */
+  get protocolVersion(): number {
+    return this._protocolVersion;
   }
 
   // ============ Connection ============
@@ -331,6 +346,7 @@ export class NoLag {
 
     this._status = "disconnected";
     this._presenceMap.clear();
+    this._failAllPending("client disconnected");
 
     // Emit disconnect event if we were connected
     if (wasConnected) {
@@ -385,7 +401,7 @@ export class NoLag {
       };
       this.on("presenceList" as any, handler as any);
 
-      this._send({ type: "getPresence" });
+      this._trySend({ type: "getPresence" });
 
       // Timeout after 5 seconds
       setTimeout(() => {
@@ -454,9 +470,52 @@ export class NoLag {
       subscribeMessage.filters = filters;
       this._topicFilters.set(topic, [...filters]);
     }
-    this._send(subscribeMessage);
+    try {
+      this._send(subscribeMessage, { op: "subscribe", topic });
+    } catch (e) {
+      if (cb) { cb(e as Error); return; }
+      throw e;
+    }
 
-    cb?.(null);
+    // Real ack: resolve on the broker's `subscribed` frame, reject on a
+    // topic-matched error frame (e.g. not_authorized, 42940 unknown_topic).
+    if (cb) {
+      const timer = setTimeout(() => {
+        this._settleSubscribe(topic, new Error(`subscribe '${topic}' was not acknowledged within ${PENDING_OP_TIMEOUT_MS}ms`));
+      }, PENDING_OP_TIMEOUT_MS);
+      const entry = { cb, timer };
+      const pending = this._pendingSubscribes.get(topic);
+      if (pending) pending.push(entry);
+      else this._pendingSubscribes.set(topic, [entry]);
+    }
+  }
+
+  private _settleSubscribe(topic: string, err: Error | null): void {
+    const pending = this._pendingSubscribes.get(topic);
+    if (!pending) return;
+    this._pendingSubscribes.delete(topic);
+    for (const { cb, timer } of pending) {
+      clearTimeout(timer);
+      cb(err);
+    }
+  }
+
+  private _settlePublish(msgRef: string, err: Error | null): boolean {
+    const pending = this._pendingPublishes.get(msgRef);
+    if (!pending) return false;
+    this._pendingPublishes.delete(msgRef);
+    clearTimeout(pending.timer);
+    pending.cb(err);
+    return true;
+  }
+
+  private _failAllPending(reason: string): void {
+    for (const [topic] of this._pendingSubscribes) {
+      this._settleSubscribe(topic, new Error(`subscribe '${topic}' aborted: ${reason}`));
+    }
+    for (const [msgRef] of this._pendingPublishes) {
+      this._settlePublish(msgRef, new Error(`publish aborted: ${reason}`));
+    }
   }
 
   /**
@@ -471,7 +530,12 @@ export class NoLag {
     }
 
     this._log("Unsubscribing from:", topic);
-    this._send({ type: "unsubscribe", topic });
+    try {
+      this._send({ type: "unsubscribe", topic }, { op: "unsubscribe", topic });
+    } catch (e) {
+      if (callback) { callback(e as Error); return; }
+      throw e;
+    }
     callback?.(null);
   }
 
@@ -494,7 +558,7 @@ export class NoLag {
       this._topicFilters.delete(topic);
     }
 
-    this._send({ type: "setFilters", topic, filters });
+    this._send({ type: "setFilters", topic, filters }, { op: "setFilters", topic });
     callback?.(null);
   }
 
@@ -586,7 +650,7 @@ export class NoLag {
 
     this._log("Emitting to:", topic, data);
 
-    const publishMessage: { type: string; topic: string; data: unknown; qos: QoS; echo: boolean; filter?: string; filters?: string[] } = {
+    const publishMessage: { type: string; topic: string; data: unknown; qos: QoS; echo: boolean; filter?: string; filters?: string[]; msgRef?: string } = {
       type: "publish",
       topic,
       data,
@@ -598,9 +662,32 @@ export class NoLag {
     } else if (options.filters && options.filters.length > 0) {
       publishMessage.filters = options.filters;
     }
-    this._send(publishMessage);
 
-    ackCb?.(null);
+    // v2 brokers ack publishes: attach a msgRef and resolve the callback on
+    // the `published` frame (or a msgRef-matched error frame). v1 keeps the
+    // legacy optimistic "sent" semantics.
+    const useRealAck = !!ackCb && this._protocolVersion >= 2;
+    let msgRef: string | undefined;
+    if (useRealAck) {
+      msgRef = `${++this._msgRefCounter}-${Math.random().toString(36).slice(2, 10)}`;
+      publishMessage.msgRef = msgRef;
+    }
+
+    try {
+      this._send(publishMessage, { op: "publish", topic });
+    } catch (e) {
+      if (ackCb) { ackCb(e as Error); return; }
+      throw e;
+    }
+
+    if (useRealAck && msgRef && ackCb) {
+      const timer = setTimeout(() => {
+        this._settlePublish(msgRef!, new Error(`publish to '${topic}' was not acknowledged within ${PENDING_OP_TIMEOUT_MS}ms`));
+      }, PENDING_OP_TIMEOUT_MS);
+      this._pendingPublishes.set(msgRef, { cb: ackCb, timer });
+    } else {
+      ackCb?.(null);
+    }
   }
 
   // ============ Event Handlers ============
@@ -686,6 +773,9 @@ export class NoLag {
             this._actorTokenId = msg.actorTokenId || this._options.actorTokenId || null;
             this._projectId = msg.projectId || null;
             this._actorType = msg.actorType || null;
+            // Pre-v2 brokers omit the field => negotiate down to 1
+            this._protocolVersion =
+              typeof msg.protocolVersion === "number" ? msg.protocolVersion : 1;
             // Return restored subscriptions (server returns objects with loadBalance info)
             resolve(msg.restoredSubscriptions || []);
           } else {
@@ -699,9 +789,10 @@ export class NoLag {
 
       // Only include reconnect flag when true (reconnecting after disconnect)
       // Absence of reconnect flag = fresh connect (no subscription restoration)
-      const authMessage: { type: string; token: string; reconnect?: boolean; projectId?: string } = {
+      const authMessage: { type: string; token: string; reconnect?: boolean; projectId?: string; protocolVersion: number } = {
         type: "auth",
         token: this._options.token,
+        protocolVersion: PROTOCOL_VERSION,
       };
       if (this._isReconnecting) {
         authMessage.reconnect = true;
@@ -710,23 +801,47 @@ export class NoLag {
       if (this._options.projectId) {
         authMessage.projectId = this._options.projectId;
       }
-      this._send(authMessage);
+      try {
+        this._send(authMessage, { op: "auth" });
+      } catch (e) {
+        clearTimeout(timeout);
+        delete (this as any)._authHandler;
+        reject(e as Error);
+      }
     });
   }
 
   private _sendPresence(data: PresenceData, callback?: AckCallback): void {
-    this._send({ type: "presence", data });
+    this._trySend({ type: "presence", data }, { op: "presence" });
     callback?.(null);
   }
 
-  private _send(message: object): void {
+  private _send(message: object, context?: { op: string; topic?: string }): void {
     if (!this._ws || this._ws.readyState !== WebSocket.OPEN) {
-      this._log("Cannot send, WebSocket not open");
-      return;
+      throw new Error(
+        `Cannot send${context ? ` (${context.op}${context.topic ? ` '${context.topic}'` : ""})` : ""}: WebSocket not open`
+      );
     }
 
-    const payload = msgpackEncode(message);
+    let payload;
+    try {
+      payload = msgpackEncode(message);
+    } catch (cause) {
+      const err = new NoLagEncodeError(context?.op ?? "send", context?.topic, cause);
+      this._emitEvent("error", err);
+      throw err;
+    }
     this._ws.send(payload);
+  }
+
+  /** Fire-and-forget internal sends (acks, presence, heartbeats): never throw,
+   *  but encode failures are still surfaced on the 'error' event by _send. */
+  private _trySend(message: object, context?: { op: string; topic?: string }): void {
+    try {
+      this._send(message, context);
+    } catch (e) {
+      this._log("Send failed:", (e as Error).message);
+    }
   }
 
   private _handleMessage(data: ArrayBuffer | string): void {
@@ -791,6 +906,14 @@ export class NoLag {
 
       case "subscribed":
         this._log("Subscribed to:", message.topic);
+        this._settleSubscribe(message.topic, null);
+        break;
+
+      case "published":
+        this._log("Publish acked:", message.topic, message.msgRef);
+        if (message.msgRef) {
+          this._settlePublish(message.msgRef, null);
+        }
         break;
 
       case "unsubscribed":
@@ -810,10 +933,26 @@ export class NoLag {
         this._handleReplayEnd(message);
         break;
 
-      case "error":
-        this._log("Server error:", message.error);
-        this._emitEvent("error", new Error(message.error));
+      case "error": {
+        this._log("Server error:", message.error, message.topic ?? "", message.hint ?? "");
+        const serverError = new NoLagServerError({
+          code: message.code,
+          error: message.error,
+          topic: message.topic,
+          hint: message.hint,
+          msgRef: message.msgRef,
+        });
+        // Route to the pending operation that caused it (and ALSO emit the
+        // event — observers should see every server error)
+        if (message.msgRef) {
+          this._settlePublish(message.msgRef, serverError);
+        }
+        if (message.topic) {
+          this._settleSubscribe(message.topic, serverError);
+        }
+        this._emitEvent("error", serverError);
         break;
+      }
 
       default:
         this._log("Unknown message type:", message.type);
@@ -897,10 +1036,10 @@ export class NoLag {
 
     if (this._pendingAcks.length === 1) {
       // Single ACK
-      this._send({ type: "ack", msgId: this._pendingAcks[0] });
+      this._trySend({ type: "ack", msgId: this._pendingAcks[0] });
     } else {
       // Batch ACK
-      this._send({ type: "batchAck", msgIds: this._pendingAcks });
+      this._trySend({ type: "batchAck", msgIds: this._pendingAcks });
     }
 
     this._pendingAcks = [];
