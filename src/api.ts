@@ -262,6 +262,20 @@ class RoomsApi {
   }
 
   /**
+   * Ensure a dynamic room exists (idempotent create-if-not-exists).
+   *
+   * For runtime per-entity rooms (a matter id, a device id): the creator
+   * calls this once at entity-creation time; everyone else just joins and
+   * gets a loud error if the room is missing (the broker never creates rooms
+   * implicitly — that would silently hide typo'd/asymmetric slugs). Requires
+   * the app to have `config.autoProvisionRooms=true`; capped per app. Returns
+   * the existing room unchanged on slug match.
+   */
+  async ensure(appId: string, data: RoomCreate): Promise<Room> {
+    return this._api.request<Room>("POST", `/apps/${appId}/rooms/ensure`, data);
+  }
+
+  /**
    * Update a room
    */
   async update(appId: string, roomId: string, data: RoomUpdate): Promise<Room> {
