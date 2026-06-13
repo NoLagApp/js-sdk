@@ -1681,6 +1681,40 @@ function decode(buffer, options) {
     return decoder.decode(buffer);
 }
 
+/**
+ * Structured errors — every failure carries enough context to act on.
+ *
+ * The platform's debugging history shows that silent or generic failures
+ * ("Correlation timed out") cost days; these errors exist so the SDK can
+ * tell users WHAT failed and WHERE, at the call site that caused it.
+ */
+/** A payload could not be msgpack-encoded (e.g. class instances, cycles). */
+class NoLagEncodeError extends Error {
+    constructor(op, topic, cause) {
+        const causeMsg = cause instanceof Error ? cause.message : String(cause);
+        super(`Cannot encode payload for ${op}${topic ? ` to '${topic}'` : ""}: ${causeMsg}. ` +
+            `Payloads must be plain msgpack-serializable data (no class instances, ` +
+            `Promises, functions, or circular references).`);
+        this.name = "NoLagEncodeError";
+        this.op = op;
+        this.topic = topic;
+    }
+}
+/** A structured error frame sent by the broker. */
+class NoLagServerError extends Error {
+    constructor(frame) {
+        super(`${frame.error}${frame.code ? ` (${frame.code})` : ""}` +
+            `${frame.topic ? ` on '${frame.topic}'` : ""}` +
+            `${frame.hint ? ` — ${frame.hint}` : ""}`);
+        this.name = "NoLagServerError";
+        this.code = frame.code;
+        this.error = frame.error;
+        this.topic = frame.topic;
+        this.hint = frame.hint;
+        this.msgRef = frame.msgRef;
+    }
+}
+
 // WebSocket ready states (same for browser and ws package)
 const WS_READY_STATE = {
     OPEN: 1};
@@ -1693,6 +1727,9 @@ const WS_READY_STATE = {
  * On reconnect, the server automatically restores all subscriptions.
  */
 const DEFAULT_URL = "wss://broker.nolag.app/ws";
+/** Protocol v2: loud failures (42940 unknown_topic), published acks, auto-provisioned rooms */
+const PROTOCOL_VERSION = 2;
+const PENDING_OP_TIMEOUT_MS = 10000;
 const DEFAULT_RECONNECT_INTERVAL = 5000;
 const DEFAULT_MAX_RECONNECT_ATTEMPTS = 10;
 const DEFAULT_HEARTBEAT_INTERVAL = 30000;
@@ -1739,6 +1776,11 @@ let NoLag$1 = class NoLag {
         this._actorTokenId = null;
         this._projectId = null;
         this._actorType = null;
+        this._protocolVersion = 1;
+        // Pending operation tracking: real acks instead of optimistic cb(null)
+        this._pendingSubscribes = new Map();
+        this._pendingPublishes = new Map();
+        this._msgRefCounter = 0;
         // Presence
         this._presence = null;
         this._presenceMap = new Map();
@@ -1749,7 +1791,7 @@ let NoLag$1 = class NoLag {
         this._pendingAcks = [];
         this._ackTimer = null;
         this._ackBatchInterval = 0; // ms (default: immediate ACKs)
-        // Topic filters tracking (topic -> set of filter values)
+        // Topic filters tracking (topic -> mixed filter array with OR strings and AND groups)
         this._topicFilters = new Map();
         // Event handlers (local - for routing messages to callbacks)
         this._eventHandlers = new Map();
@@ -1811,6 +1853,10 @@ let NoLag$1 = class NoLag {
     }
     get loadBalanceGroup() {
         return this._options.loadBalanceGroup;
+    }
+    /** Negotiated protocol version (1 against pre-v2 brokers). */
+    get protocolVersion() {
+        return this._protocolVersion;
     }
     // ============ Connection ============
     /**
@@ -1920,6 +1966,7 @@ let NoLag$1 = class NoLag {
         }
         this._status = "disconnected";
         this._presenceMap.clear();
+        this._failAllPending("client disconnected");
         // Emit disconnect event if we were connected
         if (wasConnected) {
             this._emitEvent("disconnect", "Client disconnect");
@@ -1960,7 +2007,7 @@ let NoLag$1 = class NoLag {
                 resolve(presenceList);
             };
             this.on("presenceList", handler);
-            this._send({ type: "getPresence" });
+            this._trySend({ type: "getPresence" });
             // Timeout after 5 seconds
             setTimeout(() => {
                 this.off("presenceList", handler);
@@ -1993,14 +2040,62 @@ let NoLag$1 = class NoLag {
                 subscribeMessage.loadBalanceGroup = loadBalanceGroup;
             }
         }
-        // Include filters if provided
+        // Include filters if provided (supports mixed arrays with AND groups)
         const filters = options.filters;
         if (filters && filters.length > 0) {
             subscribeMessage.filters = filters;
-            this._topicFilters.set(topic, new Set(filters));
+            this._topicFilters.set(topic, [...filters]);
         }
-        this._send(subscribeMessage);
-        cb?.(null);
+        try {
+            this._send(subscribeMessage, { op: "subscribe", topic });
+        }
+        catch (e) {
+            if (cb) {
+                cb(e);
+                return;
+            }
+            throw e;
+        }
+        // Real ack: resolve on the broker's `subscribed` frame, reject on a
+        // topic-matched error frame (e.g. not_authorized, 42940 unknown_topic).
+        if (cb) {
+            const timer = setTimeout(() => {
+                this._settleSubscribe(topic, new Error(`subscribe '${topic}' was not acknowledged within ${PENDING_OP_TIMEOUT_MS}ms`));
+            }, PENDING_OP_TIMEOUT_MS);
+            const entry = { cb, timer };
+            const pending = this._pendingSubscribes.get(topic);
+            if (pending)
+                pending.push(entry);
+            else
+                this._pendingSubscribes.set(topic, [entry]);
+        }
+    }
+    _settleSubscribe(topic, err) {
+        const pending = this._pendingSubscribes.get(topic);
+        if (!pending)
+            return;
+        this._pendingSubscribes.delete(topic);
+        for (const { cb, timer } of pending) {
+            clearTimeout(timer);
+            cb(err);
+        }
+    }
+    _settlePublish(msgRef, err) {
+        const pending = this._pendingPublishes.get(msgRef);
+        if (!pending)
+            return false;
+        this._pendingPublishes.delete(msgRef);
+        clearTimeout(pending.timer);
+        pending.cb(err);
+        return true;
+    }
+    _failAllPending(reason) {
+        for (const [topic] of this._pendingSubscribes) {
+            this._settleSubscribe(topic, new Error(`subscribe '${topic}' aborted: ${reason}`));
+        }
+        for (const [msgRef] of this._pendingPublishes) {
+            this._settlePublish(msgRef, new Error(`publish aborted: ${reason}`));
+        }
     }
     /**
      * Unsubscribe from a topic
@@ -2013,7 +2108,16 @@ let NoLag$1 = class NoLag {
             return;
         }
         this._log("Unsubscribing from:", topic);
-        this._send({ type: "unsubscribe", topic });
+        try {
+            this._send({ type: "unsubscribe", topic }, { op: "unsubscribe", topic });
+        }
+        catch (e) {
+            if (callback) {
+                callback(e);
+                return;
+            }
+            throw e;
+        }
         callback?.(null);
     }
     /**
@@ -2028,12 +2132,12 @@ let NoLag$1 = class NoLag {
         }
         this._log("Setting filters for:", topic, filters);
         if (filters.length > 0) {
-            this._topicFilters.set(topic, new Set(filters));
+            this._topicFilters.set(topic, [...filters]);
         }
         else {
             this._topicFilters.delete(topic);
         }
-        this._send({ type: "setFilters", topic, filters });
+        this._send({ type: "setFilters", topic, filters }, { op: "setFilters", topic });
         callback?.(null);
     }
     /**
@@ -2041,11 +2145,23 @@ let NoLag$1 = class NoLag {
      * Merges with current filters and sends the full set to the server.
      */
     addFilters(topic, filters, callback) {
-        const existing = this._topicFilters.get(topic) || new Set();
-        for (const f of filters) {
-            existing.add(f);
+        const existing = this._topicFilters.get(topic) || [];
+        // Collect existing simple strings into a set for dedup
+        const simpleSet = new Set();
+        const andGroups = [];
+        for (const item of existing) {
+            if (typeof item === "string") {
+                simpleSet.add(item);
+            }
+            else {
+                andGroups.push(item);
+            }
         }
-        this.setFilters(topic, Array.from(existing), callback);
+        for (const f of filters) {
+            simpleSet.add(f);
+        }
+        const merged = [...Array.from(simpleSet), ...andGroups];
+        this.setFilters(topic, merged, callback);
     }
     /**
      * Remove specific filters from a topic.
@@ -2057,10 +2173,10 @@ let NoLag$1 = class NoLag {
             callback?.(null);
             return;
         }
-        for (const f of filters) {
-            existing.delete(f);
-        }
-        this.setFilters(topic, Array.from(existing), callback);
+        const removeSet = new Set(filters);
+        // Remove matching simple strings, preserve AND groups
+        const remaining = existing.filter((item) => typeof item !== "string" || !removeSet.has(item));
+        this.setFilters(topic, remaining, callback);
     }
     /**
      * Acknowledge receipt of a message
@@ -2109,8 +2225,37 @@ let NoLag$1 = class NoLag {
         if (options.filter) {
             publishMessage.filter = options.filter;
         }
-        this._send(publishMessage);
-        ackCb?.(null);
+        else if (options.filters && options.filters.length > 0) {
+            publishMessage.filters = options.filters;
+        }
+        // v2 brokers ack publishes: attach a msgRef and resolve the callback on
+        // the `published` frame (or a msgRef-matched error frame). v1 keeps the
+        // legacy optimistic "sent" semantics.
+        const useRealAck = !!ackCb && this._protocolVersion >= 2;
+        let msgRef;
+        if (useRealAck) {
+            msgRef = `${++this._msgRefCounter}-${Math.random().toString(36).slice(2, 10)}`;
+            publishMessage.msgRef = msgRef;
+        }
+        try {
+            this._send(publishMessage, { op: "publish", topic });
+        }
+        catch (e) {
+            if (ackCb) {
+                ackCb(e);
+                return;
+            }
+            throw e;
+        }
+        if (useRealAck && msgRef && ackCb) {
+            const timer = setTimeout(() => {
+                this._settlePublish(msgRef, new Error(`publish to '${topic}' was not acknowledged within ${PENDING_OP_TIMEOUT_MS}ms`));
+            }, PENDING_OP_TIMEOUT_MS);
+            this._pendingPublishes.set(msgRef, { cb: ackCb, timer });
+        }
+        else {
+            ackCb?.(null);
+        }
     }
     on(event, handler) {
         if (!this._eventHandlers.has(event)) {
@@ -2173,6 +2318,9 @@ let NoLag$1 = class NoLag {
                         this._actorTokenId = msg.actorTokenId || this._options.actorTokenId || null;
                         this._projectId = msg.projectId || null;
                         this._actorType = msg.actorType || null;
+                        // Pre-v2 brokers omit the field => negotiate down to 1
+                        this._protocolVersion =
+                            typeof msg.protocolVersion === "number" ? msg.protocolVersion : 1;
                         // Return restored subscriptions (server returns objects with loadBalance info)
                         resolve(msg.restoredSubscriptions || []);
                     }
@@ -2188,6 +2336,7 @@ let NoLag$1 = class NoLag {
             const authMessage = {
                 type: "auth",
                 token: this._options.token,
+                protocolVersion: PROTOCOL_VERSION,
             };
             if (this._isReconnecting) {
                 authMessage.reconnect = true;
@@ -2196,20 +2345,44 @@ let NoLag$1 = class NoLag {
             if (this._options.projectId) {
                 authMessage.projectId = this._options.projectId;
             }
-            this._send(authMessage);
+            try {
+                this._send(authMessage, { op: "auth" });
+            }
+            catch (e) {
+                clearTimeout(timeout);
+                delete this._authHandler;
+                reject(e);
+            }
         });
     }
     _sendPresence(data, callback) {
-        this._send({ type: "presence", data });
+        this._trySend({ type: "presence", data }, { op: "presence" });
         callback?.(null);
     }
-    _send(message) {
+    _send(message, context) {
         if (!this._ws || this._ws.readyState !== WebSocket.OPEN) {
-            this._log("Cannot send, WebSocket not open");
-            return;
+            throw new Error(`Cannot send${context ? ` (${context.op}${context.topic ? ` '${context.topic}'` : ""})` : ""}: WebSocket not open`);
         }
-        const payload = encode(message);
+        let payload;
+        try {
+            payload = encode(message);
+        }
+        catch (cause) {
+            const err = new NoLagEncodeError(context?.op ?? "send", context?.topic, cause);
+            this._emitEvent("error", err);
+            throw err;
+        }
         this._ws.send(payload);
+    }
+    /** Fire-and-forget internal sends (acks, presence, heartbeats): never throw,
+     *  but encode failures are still surfaced on the 'error' event by _send. */
+    _trySend(message, context) {
+        try {
+            this._send(message, context);
+        }
+        catch (e) {
+            this._log("Send failed:", e.message);
+        }
     }
     _handleMessage(data) {
         // Handle empty binary packet (heartbeat response)
@@ -2263,6 +2436,13 @@ let NoLag$1 = class NoLag {
                 break;
             case "subscribed":
                 this._log("Subscribed to:", message.topic);
+                this._settleSubscribe(message.topic, null);
+                break;
+            case "published":
+                this._log("Publish acked:", message.topic, message.msgRef);
+                if (message.msgRef) {
+                    this._settlePublish(message.msgRef, null);
+                }
                 break;
             case "unsubscribed":
                 this._log("Unsubscribed from:", message.topic);
@@ -2277,10 +2457,26 @@ let NoLag$1 = class NoLag {
             case "replayEnd":
                 this._handleReplayEnd(message);
                 break;
-            case "error":
-                this._log("Server error:", message.error);
-                this._emitEvent("error", new Error(message.error));
+            case "error": {
+                this._log("Server error:", message.error, message.topic ?? "", message.hint ?? "");
+                const serverError = new NoLagServerError({
+                    code: message.code,
+                    error: message.error,
+                    topic: message.topic,
+                    hint: message.hint,
+                    msgRef: message.msgRef,
+                });
+                // Route to the pending operation that caused it (and ALSO emit the
+                // event — observers should see every server error)
+                if (message.msgRef) {
+                    this._settlePublish(message.msgRef, serverError);
+                }
+                if (message.topic) {
+                    this._settleSubscribe(message.topic, serverError);
+                }
+                this._emitEvent("error", serverError);
                 break;
+            }
             default:
                 this._log("Unknown message type:", message.type);
         }
@@ -2352,11 +2548,11 @@ let NoLag$1 = class NoLag {
             return;
         if (this._pendingAcks.length === 1) {
             // Single ACK
-            this._send({ type: "ack", msgId: this._pendingAcks[0] });
+            this._trySend({ type: "ack", msgId: this._pendingAcks[0] });
         }
         else {
             // Batch ACK
-            this._send({ type: "batchAck", msgIds: this._pendingAcks });
+            this._trySend({ type: "batchAck", msgIds: this._pendingAcks });
         }
         this._pendingAcks = [];
         this._ackTimer = null;
@@ -2805,6 +3001,7 @@ class NoLagApi {
         this.apps = new AppsApi(this);
         this.rooms = new RoomsApi(this);
         this.actors = new ActorsApi(this);
+        this.scopes = new ScopesApi(this);
     }
     /**
      * Make an authenticated request to the NoLag API
@@ -2945,6 +3142,19 @@ class RoomsApi {
         return this._api.request("POST", `/apps/${appId}/rooms`, data);
     }
     /**
+     * Ensure a dynamic room exists (idempotent create-if-not-exists).
+     *
+     * For runtime per-entity rooms (a matter id, a device id): the creator
+     * calls this once at entity-creation time; everyone else just joins and
+     * gets a loud error if the room is missing (the broker never creates rooms
+     * implicitly — that would silently hide typo'd/asymmetric slugs). Requires
+     * the app to have `config.autoProvisionRooms=true`; capped per app. Returns
+     * the existing room unchanged on slug match.
+     */
+    async ensure(appId, data) {
+        return this._api.request("POST", `/apps/${appId}/rooms/ensure`, data);
+    }
+    /**
      * Update a room
      */
     async update(appId, roomId, data) {
@@ -2993,6 +3203,60 @@ class ActorsApi {
      */
     async delete(actorId) {
         await this._api.request("DELETE", `/actors/${actorId}`);
+    }
+}
+// ============ Scopes API ============
+class ScopesApi {
+    constructor(_api) {
+        this._api = _api;
+    }
+    /**
+     * List all access scopes in the project
+     */
+    async list(options) {
+        return this._api.request("GET", "/scopes", undefined, options);
+    }
+    /**
+     * Get an access scope by ID
+     */
+    async get(scopeId) {
+        return this._api.request("GET", `/scopes/${scopeId}`);
+    }
+    /**
+     * Create a new access scope
+     */
+    async create(data) {
+        return this._api.request("POST", "/scopes", data);
+    }
+    /**
+     * Update an access scope
+     */
+    async update(scopeId, data) {
+        return this._api.request("PATCH", `/scopes/${scopeId}`, data);
+    }
+    /**
+     * Delete an access scope
+     */
+    async delete(scopeId) {
+        await this._api.request("DELETE", `/scopes/${scopeId}`);
+    }
+    /**
+     * List actors assigned to a scope
+     */
+    async listActors(scopeId) {
+        return this._api.request("GET", `/scopes/${scopeId}/actors`);
+    }
+    /**
+     * Assign an actor to this scope
+     */
+    async addActor(scopeId, actorId) {
+        return this._api.actors.update(actorId, { accessScopeId: scopeId });
+    }
+    /**
+     * Remove an actor from this scope (unscope it)
+     */
+    async removeActor(actorId) {
+        return this._api.actors.update(actorId, { accessScopeId: null });
     }
 }
 
@@ -3578,5 +3842,5 @@ const NoLag = (token, options) => {
     return new NoLag$1(createWebSocket, token, options);
 };
 
-export { NoLag, NoLagApi, NoLagApiError, NoLag$1 as NoLagSocket, WebRTCManager, NoLag as default };
+export { NoLag, NoLagApi, NoLagApiError, NoLagEncodeError, NoLagServerError, NoLag$1 as NoLagSocket, WebRTCManager, NoLag as default };
 //# sourceMappingURL=index.mjs.map

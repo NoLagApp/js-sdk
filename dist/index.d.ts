@@ -4,6 +4,7 @@
  */
 import { NoLag as NoLagClient } from "./client";
 import type { NoLagOptions } from "./types";
+export { NoLagEncodeError, NoLagServerError } from "./errors";
 export { NoLagSocket } from "./client";
 export type { QoS, NoLagOptions, ConnectionStatus, ActorType, Permission, PresenceData, ActorPresence, LobbyPresenceEvent, LobbyPresenceState, NoLagEventType, MessageMeta, ReplayStartEvent, ReplayEndEvent, ReplayStartHandler, ReplayEndHandler, SubscribeOptions, EmitOptions, RestoredSubscription, ConnectHandler, DisconnectHandler, ReconnectHandler, ErrorHandler, PresenceHandler, LobbyPresenceHandler, MessageHandler, AckCallback, AppContext, RoomContext, LobbyContext, } from "./types";
 export type { WebSocketFactory, IUnifiedWebSocket } from "./websocket/types";

@@ -51,6 +51,10 @@ export declare class NoLag {
     private _actorTokenId;
     private _projectId;
     private _actorType;
+    private _protocolVersion;
+    private _pendingSubscribes;
+    private _pendingPublishes;
+    private _msgRefCounter;
     private _presence;
     private _presenceMap;
     private _isReplaying;
@@ -75,6 +79,8 @@ export declare class NoLag {
     get projectId(): string | null;
     get loadBalanced(): boolean;
     get loadBalanceGroup(): string | undefined;
+    /** Negotiated protocol version (1 against pre-v2 brokers). */
+    get protocolVersion(): number;
     /**
      * Connect to NoLag
      *
@@ -117,6 +123,9 @@ export declare class NoLag {
      */
     subscribe(topic: string, callback?: AckCallback): void;
     subscribe(topic: string, options: SubscribeOptions, callback?: AckCallback): void;
+    private _settleSubscribe;
+    private _settlePublish;
+    private _failAllPending;
     /**
      * Unsubscribe from a topic
      *
@@ -128,7 +137,7 @@ export declare class NoLag {
      * Sends a setFilters message to the server which handles subscribe/unsubscribe diffs.
      * Empty array switches back to wildcard (receive all messages).
      */
-    setFilters(topic: string, filters: string[], callback?: AckCallback): void;
+    setFilters(topic: string, filters: (string | string[])[], callback?: AckCallback): void;
     /**
      * Add filters to the existing set for a topic.
      * Merges with current filters and sends the full set to the server.
@@ -197,6 +206,9 @@ export declare class NoLag {
     private _authenticate;
     private _sendPresence;
     private _send;
+    /** Fire-and-forget internal sends (acks, presence, heartbeats): never throw,
+     *  but encode failures are still surfaced on the 'error' event by _send. */
+    private _trySend;
     private _handleMessage;
     private _handleTopicMessage;
     private _handleReplayStart;

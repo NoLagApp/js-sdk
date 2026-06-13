@@ -7,7 +7,7 @@
  * Use this for managing apps, rooms, and actors within your project.
  * For real-time messaging, use the main NoLag WebSocket client.
  */
-import { NoLagApiOptions, ListOptions, PaginatedResult, ApiError, App, AppCreate, AppUpdate, Room, RoomCreate, RoomUpdate, Actor, ActorWithToken, ActorCreate, ActorUpdate } from "./api-types";
+import { NoLagApiOptions, ListOptions, PaginatedResult, ApiError, App, AppCreate, AppUpdate, Room, RoomCreate, RoomUpdate, Actor, ActorWithToken, ActorCreate, ActorUpdate, Scope, ScopeCreate, ScopeUpdate } from "./api-types";
 /**
  * NoLag REST API Client
  *
@@ -43,6 +43,7 @@ export declare class NoLagApi {
     readonly apps: AppsApi;
     readonly rooms: RoomsApi;
     readonly actors: ActorsApi;
+    readonly scopes: ScopesApi;
     constructor(apiKey: string, options?: NoLagApiOptions);
     /**
      * Make an authenticated request to the NoLag API
@@ -103,6 +104,17 @@ declare class RoomsApi {
      */
     create(appId: string, data: RoomCreate): Promise<Room>;
     /**
+     * Ensure a dynamic room exists (idempotent create-if-not-exists).
+     *
+     * For runtime per-entity rooms (a matter id, a device id): the creator
+     * calls this once at entity-creation time; everyone else just joins and
+     * gets a loud error if the room is missing (the broker never creates rooms
+     * implicitly — that would silently hide typo'd/asymmetric slugs). Requires
+     * the app to have `config.autoProvisionRooms=true`; capped per app. Returns
+     * the existing room unchanged on slug match.
+     */
+    ensure(appId: string, data: RoomCreate): Promise<Room>;
+    /**
      * Update a room
      */
     update(appId: string, roomId: string, data: RoomUpdate): Promise<Room>;
@@ -136,5 +148,41 @@ declare class ActorsApi {
      * Delete an actor
      */
     delete(actorId: string): Promise<void>;
+}
+declare class ScopesApi {
+    private _api;
+    constructor(_api: NoLagApi);
+    /**
+     * List all access scopes in the project
+     */
+    list(options?: ListOptions): Promise<PaginatedResult<Scope>>;
+    /**
+     * Get an access scope by ID
+     */
+    get(scopeId: string): Promise<Scope>;
+    /**
+     * Create a new access scope
+     */
+    create(data: ScopeCreate): Promise<Scope>;
+    /**
+     * Update an access scope
+     */
+    update(scopeId: string, data: ScopeUpdate): Promise<Scope>;
+    /**
+     * Delete an access scope
+     */
+    delete(scopeId: string): Promise<void>;
+    /**
+     * List actors assigned to a scope
+     */
+    listActors(scopeId: string): Promise<Actor[]>;
+    /**
+     * Assign an actor to this scope
+     */
+    addActor(scopeId: string, actorId: string): Promise<Actor>;
+    /**
+     * Remove an actor from this scope (unscope it)
+     */
+    removeActor(actorId: string): Promise<Actor>;
 }
 export {};
