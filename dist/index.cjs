@@ -2,7 +2,7 @@
 
 Object.defineProperty(exports, '__esModule', { value: true });
 
-var WebSocket$1 = require('ws');
+var WebSocket = require('ws');
 
 function utf8Count(str) {
     const strLength = str.length;
@@ -2364,7 +2364,7 @@ let NoLag$1 = class NoLag {
         callback?.(null);
     }
     _send(message, context) {
-        if (!this._ws || this._ws.readyState !== WebSocket.OPEN) {
+        if (!this._ws || this._ws.readyState !== WS_READY_STATE.OPEN) {
             throw new Error(`Cannot send${context ? ` (${context.op}${context.topic ? ` '${context.topic}'` : ""})` : ""}: WebSocket not open`);
         }
         let payload;
@@ -2570,6 +2570,9 @@ let NoLag$1 = class NoLag {
             actorTokenId: rawData.actorTokenId || rawData.actor_token_id,
             presence: rawData.presence,
             joinedAt: rawData.joinedAt || rawData.joined_at,
+            // Persistent Presence: status (online|offline|waking) + advertisement version
+            status: rawData.status,
+            advertisementVersion: rawData.advertisementVersion ?? rawData.advertisement_version,
         };
         if (!data.actorTokenId) {
             return;
@@ -2585,6 +2588,12 @@ let NoLag$1 = class NoLag {
                 break;
             case "update":
                 this._presenceMap.set(data.actorTokenId, data);
+                this._emitEvent("presence:update", data);
+                break;
+            // Persistent Presence: a wake webhook was fired for an offline actor.
+            case "waking":
+                this._presenceMap.set(data.actorTokenId, data);
+                this._emitEvent("presence:waking", data);
                 this._emitEvent("presence:update", data);
                 break;
         }
@@ -2913,7 +2922,7 @@ class App {
  * Uses the 'ws' package
  */
 const createWebSocket = (url) => {
-    const ws = new WebSocket$1(url);
+    const ws = new WebSocket(url);
     let onOpenCallback;
     let onMessageCallback;
     let onCloseCallback;

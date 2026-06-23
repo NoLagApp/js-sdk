@@ -52,12 +52,23 @@ export interface NoLagOptions {
 export type ConnectionStatus = "disconnected" | "connecting" | "connected" | "reconnecting";
 export type ActorType = "device" | "user" | "server" | "service" | "session" | "agent" | "orchestrator" | "observer";
 export type Permission = "subscribe" | "publish" | "pubSub";
-export type PresenceData = Record<string, unknown>;
+export type PresenceStatus = "online" | "offline" | "waking";
+export interface WakeConfig {
+    url: string;
+    timeoutMs?: number;
+    enabled?: boolean;
+}
+export type PresenceData = Record<string, unknown> & {
+    persistent?: boolean;
+    wake?: WakeConfig;
+};
 export interface ActorPresence {
     actorTokenId: string;
     actorType?: ActorType;
     presence: PresenceData;
     joinedAt?: number;
+    status?: PresenceStatus;
+    advertisementVersion?: number;
 }
 export interface LobbyPresenceEvent {
     lobbyId: string;

@@ -67,8 +67,26 @@ export type ActorType = "device" | "user" | "server" | "service" | "session" | "
 // Permission types
 export type Permission = "subscribe" | "publish" | "pubSub";
 
-// Presence data (user-defined)
-export type PresenceData = Record<string, unknown>;
+// Persistent Presence: lifecycle status of a (persistent) actor's record.
+// "online" = socket connected; "offline" = registered but disconnected (still
+// discoverable + wakeable); "waking" = a wake webhook has been fired.
+export type PresenceStatus = "online" | "offline" | "waking";
+
+// Persistent Presence: where NoLag fires the HMAC-signed wake webhook to bring
+// a scaled-to-zero actor back online when a message is routed to it.
+export interface WakeConfig {
+  url: string;
+  timeoutMs?: number;
+  enabled?: boolean;
+}
+
+// Presence data (user-defined). `persistent` + `wake` opt an actor into
+// Persistent Presence (durable, discoverable, wakeable); both are optional and
+// ignored by brokers/builds without the feature.
+export type PresenceData = Record<string, unknown> & {
+  persistent?: boolean;
+  wake?: WakeConfig;
+};
 
 // Actor presence info
 export interface ActorPresence {
@@ -76,6 +94,9 @@ export interface ActorPresence {
   actorType?: ActorType;
   presence: PresenceData;
   joinedAt?: number;
+  // Persistent Presence: present for persistent actors (may be offline/waking).
+  status?: PresenceStatus;
+  advertisementVersion?: number;
 }
 
 // Lobby presence event (includes room context)

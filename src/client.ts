@@ -817,7 +817,7 @@ export class NoLag {
   }
 
   private _send(message: object, context?: { op: string; topic?: string }): void {
-    if (!this._ws || this._ws.readyState !== WebSocket.OPEN) {
+    if (!this._ws || this._ws.readyState !== WS_READY_STATE.OPEN) {
       throw new Error(
         `Cannot send${context ? ` (${context.op}${context.topic ? ` '${context.topic}'` : ""})` : ""}: WebSocket not open`
       );
@@ -1056,6 +1056,10 @@ export class NoLag {
       actorTokenId: (rawData as any).actorTokenId || (rawData as any).actor_token_id,
       presence: rawData.presence,
       joinedAt: (rawData as any).joinedAt || (rawData as any).joined_at,
+      // Persistent Presence: status (online|offline|waking) + advertisement version
+      status: (rawData as any).status,
+      advertisementVersion:
+        (rawData as any).advertisementVersion ?? (rawData as any).advertisement_version,
     };
 
     if (!data.actorTokenId) {
@@ -1075,6 +1079,13 @@ export class NoLag {
 
       case "update":
         this._presenceMap.set(data.actorTokenId, data);
+        this._emitEvent("presence:update", data);
+        break;
+
+      // Persistent Presence: a wake webhook was fired for an offline actor.
+      case "waking":
+        this._presenceMap.set(data.actorTokenId, data);
+        this._emitEvent("presence:waking", data);
         this._emitEvent("presence:update", data);
         break;
     }
