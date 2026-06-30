@@ -19,6 +19,8 @@ import {
   Room,
   RoomCreate,
   RoomUpdate,
+  RoomActorAccess,
+  RoomActorAccessCreate,
   Actor,
   ActorWithToken,
   ActorCreate,
@@ -291,6 +293,53 @@ class RoomsApi {
    */
   async delete(appId: string, roomId: string): Promise<void> {
     await this._api.request<void>("DELETE", `/apps/${appId}/rooms/${roomId}`);
+  }
+
+  /**
+   * Grant an actor access to a room (room-level ACL).
+   *
+   * The first grant makes the room private — after that the broker only admits
+   * actors with an explicit, unexpired grant. Pass `actorTokenId` (a token in
+   * this project) or `actorType` (a type label). Use this to make a room (e.g.
+   * a per-user notification bell) genuinely private.
+   */
+  async grantActor(
+    appId: string,
+    roomId: string,
+    data: RoomActorAccessCreate
+  ): Promise<RoomActorAccess> {
+    return this._api.request<RoomActorAccess>(
+      "POST",
+      `/apps/${appId}/rooms/${roomId}/actors`,
+      data
+    );
+  }
+
+  /**
+   * List a room's actor grants
+   */
+  async listActors(
+    appId: string,
+    roomId: string
+  ): Promise<RoomActorAccess[]> {
+    return this._api.request<RoomActorAccess[]>(
+      "GET",
+      `/apps/${appId}/rooms/${roomId}/actors`
+    );
+  }
+
+  /**
+   * Revoke an actor's room access. Removing the last grant makes the room public again.
+   */
+  async revokeActor(
+    appId: string,
+    roomId: string,
+    roomActorAccessId: string
+  ): Promise<void> {
+    await this._api.request<void>(
+      "DELETE",
+      `/apps/${appId}/rooms/${roomId}/actors/${roomActorAccessId}`
+    );
   }
 }
 

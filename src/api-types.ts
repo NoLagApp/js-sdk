@@ -89,6 +89,47 @@ export interface RoomUpdate {
   config?: Record<string, unknown>;
 }
 
+// ============ Room Actor Access (room ACL) Types ============
+
+/** Access permission for a room grant. */
+export type AccessPermission = "subscribe" | "publish" | "pubSub";
+
+/**
+ * A room-level ACL grant. A room becomes private the moment it has at least
+ * one grant; the broker then only admits actors with an explicit, unexpired grant.
+ */
+export interface RoomActorAccess {
+  roomActorAccessId: string;
+  roomId: string;
+  actorTokenId: string | null;
+  actorType: string | null;
+  permission: AccessPermission;
+  topics: string[] | null;
+  isActive: boolean;
+  expiresAt: string | null;
+  role: string | null;
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Request to grant an actor access to a room. Provide actorTokenId OR actorType. */
+export interface RoomActorAccessCreate {
+  /** Grant a specific actor token (must belong to this project). */
+  actorTokenId?: string;
+  /** Or grant by actor type label (e.g. "agent"). */
+  actorType?: string;
+  permission: AccessPermission;
+  /** Restrict to specific topics (defaults to the room/app topics). */
+  topics?: string[];
+  isActive?: boolean;
+  /** ISO 8601 expiry; the broker denies the grant after this time. */
+  expiresAt?: string;
+  /** Display label (e.g. "moderator"). */
+  role?: string;
+  metadata?: Record<string, unknown>;
+}
+
 // ============ Actor Types ============
 
 export type ActorTokenType = "device" | "user" | "server";
