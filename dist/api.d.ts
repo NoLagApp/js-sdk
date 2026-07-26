@@ -7,7 +7,7 @@
  * Use this for managing apps, rooms, and actors within your project.
  * For real-time messaging, use the main NoLag WebSocket client.
  */
-import { NoLagApiOptions, ListOptions, PaginatedResult, ApiError, App, AppCreate, AppUpdate, Room, RoomCreate, RoomUpdate, Actor, ActorWithToken, ActorCreate, ActorUpdate, Scope, ScopeCreate, ScopeUpdate } from "./api-types";
+import { NoLagApiOptions, ListOptions, PaginatedResult, ApiError, App, AppCreate, AppUpdate, Room, RoomCreate, RoomUpdate, RoomActorAccess, RoomActorAccessCreate, Actor, ActorWithToken, ActorCreate, ActorUpdate, Scope, ScopeCreate, ScopeUpdate } from "./api-types";
 /**
  * NoLag REST API Client
  *
@@ -122,6 +122,23 @@ declare class RoomsApi {
      * Delete a dynamic room (static rooms cannot be deleted)
      */
     delete(appId: string, roomId: string): Promise<void>;
+    /**
+     * Grant an actor access to a room (room-level ACL).
+     *
+     * The first grant makes the room private — after that the broker only admits
+     * actors with an explicit, unexpired grant. Pass `actorTokenId` (a token in
+     * this project) or `actorType` (a type label). Use this to make a room (e.g.
+     * a per-user notification bell) genuinely private.
+     */
+    grantActor(appId: string, roomId: string, data: RoomActorAccessCreate): Promise<RoomActorAccess>;
+    /**
+     * List a room's actor grants
+     */
+    listActors(appId: string, roomId: string): Promise<RoomActorAccess[]>;
+    /**
+     * Revoke an actor's room access. Removing the last grant makes the room public again.
+     */
+    revokeActor(appId: string, roomId: string, roomActorAccessId: string): Promise<void>;
 }
 declare class ActorsApi {
     private _api;

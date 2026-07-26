@@ -5,6 +5,15 @@
 // QoS levels for MQTT
 export type QoS = 0 | 1 | 2;
 
+/**
+ * Async token provider for client tokens (short-lived JWTs minted by your
+ * backend). Called on every connect and reconnect, so each attempt uses a
+ * freshly minted token. When the resolved token is a JWT with an exp claim,
+ * the SDK proactively reconnects shortly before expiry (the server restores
+ * subscriptions on reconnect).
+ */
+export type TokenProvider = () => string | Promise<string>;
+
 // Connection options (all optional - token is passed separately)
 export interface NoLagOptions {
   /** Actor token ID (used as MQTT username) */

@@ -5,7 +5,7 @@
  * Subscriptions are persisted server-side - no local tracking needed.
  * On reconnect, the server automatically restores all subscriptions.
  */
-import { NoLagOptions, ConnectionStatus, ActorType, PresenceData, ActorPresence, MessageMeta, EmitOptions, SubscribeOptions, ConnectHandler, DisconnectHandler, ReconnectHandler, ErrorHandler, PresenceHandler, LobbyPresenceHandler, MessageHandler, AckCallback, AppContext, ReplayStartHandler, ReplayEndHandler } from "./types";
+import { NoLagOptions, ConnectionStatus, ActorType, PresenceData, ActorPresence, MessageMeta, EmitOptions, SubscribeOptions, ConnectHandler, DisconnectHandler, ReconnectHandler, ErrorHandler, PresenceHandler, LobbyPresenceHandler, MessageHandler, AckCallback, AppContext, ReplayStartHandler, ReplayEndHandler, TokenProvider } from "./types";
 import { WebSocketFactory } from "./websocket/types";
 type EventHandler = ConnectHandler | DisconnectHandler | ReconnectHandler | ErrorHandler | PresenceHandler | LobbyPresenceHandler | MessageHandler | ReplayStartHandler | ReplayEndHandler;
 /**
@@ -48,6 +48,9 @@ export declare class NoLag {
     private _reconnectTimer;
     private _heartbeatTimer;
     private _isReconnecting;
+    private _tokenOrProvider;
+    private _tokenRefreshTimer;
+    private _pendingTokenRefresh;
     private _actorTokenId;
     private _projectId;
     private _actorType;
@@ -64,7 +67,7 @@ export declare class NoLag {
     private _ackBatchInterval;
     private _topicFilters;
     private _eventHandlers;
-    constructor(createWebSocket: WebSocketFactory, token: string, options?: NoLagOptions);
+    constructor(createWebSocket: WebSocketFactory, token: string | TokenProvider, options?: NoLagOptions);
     get status(): ConnectionStatus;
     get connected(): boolean;
     get actorId(): string | null;
@@ -204,6 +207,18 @@ export declare class NoLag {
      */
     setApp(app: string): AppContext;
     private _authenticate;
+    /**
+     * Decode the exp claim (unix seconds) from a JWT without verifying it.
+     * Returns null for opaque tokens or anything that does not parse.
+     */
+    private _decodeJwtExp;
+    /**
+     * Schedule a proactive refresh-reconnect shortly before a client token
+     * (JWT) expires. Only armed when a token provider is available to mint
+     * a fresh token; static-string JWTs simply expire (4003).
+     */
+    private _scheduleTokenRefresh;
+    private _clearTokenRefresh;
     private _sendPresence;
     private _send;
     /** Fire-and-forget internal sends (acks, presence, heartbeats): never throw,
