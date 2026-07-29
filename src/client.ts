@@ -47,6 +47,7 @@ const PENDING_OP_TIMEOUT_MS = 10_000;
 const DEFAULT_RECONNECT_INTERVAL = 5000;
 const DEFAULT_MAX_RECONNECT_ATTEMPTS = 10;
 const DEFAULT_HEARTBEAT_INTERVAL = 30000;
+const REAUTH_TIMEOUT_MS = 10_000;
 
 type EventHandler =
   | ConnectHandler
@@ -909,13 +910,83 @@ export class NoLag {
 
     this._tokenRefreshTimer = setTimeout(() => {
       this._tokenRefreshTimer = null;
-      if (!this._ws || this._status !== "connected") return;
-      this._log("Refreshing client token via reconnect");
-      this._pendingTokenRefresh = true;
-      // onClose drives the immediate reconnect; the provider mints a fresh
-      // token and the server restores subscriptions (reconnect: true)
-      this._ws.close(1000, "token_refresh");
+      void this._refreshToken();
     }, delay);
+  }
+
+  /**
+   * Renew the client token. Preferred path: in-band `reauth` over the live
+   * connection (nothing drops, no resubscribe). Fallback (older brokers or
+   * transient failures): the reconnect flow, where the provider mints a
+   * fresh token and the server restores subscriptions.
+   */
+  private async _refreshToken(): Promise<void> {
+    if (!this._ws || this._status !== "connected") return;
+
+    let token: string;
+    try {
+      const tokenOrProvider = this._tokenOrProvider;
+      token =
+        typeof tokenOrProvider === "function"
+          ? await tokenOrProvider()
+          : tokenOrProvider;
+    } catch (err) {
+      this._log("Token provider failed during refresh, falling back to reconnect:", err);
+      this._refreshViaReconnect();
+      return;
+    }
+
+    if (!this._ws || this._status !== "connected") return;
+
+    const ok = await this._sendReauth(token);
+    if (ok) {
+      this._options.token = token;
+      this._log("Client token refreshed in-band");
+      this._scheduleTokenRefresh();
+    } else if (this._ws && this._status === "connected") {
+      this._log("In-band reauth unavailable, refreshing via reconnect");
+      this._refreshViaReconnect();
+    }
+    // If the socket dropped mid-reauth, the normal reconnect flow re-arms
+    // the refresh cycle after the next successful auth.
+  }
+
+  private _refreshViaReconnect(): void {
+    if (!this._ws || this._status !== "connected") return;
+    this._pendingTokenRefresh = true;
+    // onClose drives the immediate reconnect; the provider mints a fresh
+    // token and the server restores subscriptions (reconnect: true)
+    this._ws.close(1000, "token_refresh");
+  }
+
+  /** Send a reauth frame and resolve with the broker's verdict.
+   *  Resolves false on failure, timeout, or brokers without reauth support
+   *  (they ignore the unknown frame and the timeout fires). */
+  private _sendReauth(token: string): Promise<boolean> {
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        delete (this as any)._reauthHandler;
+        resolve(false);
+      }, REAUTH_TIMEOUT_MS);
+
+      (this as any)._reauthHandler = (msg: any) => {
+        clearTimeout(timeout);
+        delete (this as any)._reauthHandler;
+        if (msg.success !== true) {
+          this._log("Reauth rejected:", msg.error);
+        }
+        resolve(msg.success === true);
+      };
+
+      try {
+        this._send({ type: "reauth", token }, { op: "reauth" });
+      } catch (e) {
+        clearTimeout(timeout);
+        delete (this as any)._reauthHandler;
+        this._log("Reauth send failed:", e);
+        resolve(false);
+      }
+    });
   }
 
   private _clearTokenRefresh(): void {
@@ -985,6 +1056,12 @@ export class NoLag {
     if (message.type === "auth" && (this as any)._authHandler) {
       (this as any)._authHandler(message);
       delete (this as any)._authHandler;
+      return;
+    }
+
+    // Handle in-band reauth response (client-token refresh on the live socket)
+    if (message.type === "reauth") {
+      (this as any)._reauthHandler?.(message);
       return;
     }
 

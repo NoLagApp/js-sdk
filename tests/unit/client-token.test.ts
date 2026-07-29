@@ -175,7 +175,7 @@ describe("JWT exp decoding", () => {
 });
 
 describe("proactive refresh", () => {
-  it("reconnects with a fresh token at exp - 30s without a disconnect event", async () => {
+  it("refreshes in-band at exp - 30s without dropping the socket", async () => {
     let calls = 0;
     const provider = vi.fn(() =>
       makeJwt({ sub: "at_live_x", exp: Math.floor(Date.now() / 1000) + 120, n: ++calls })
@@ -190,18 +190,72 @@ describe("proactive refresh", () => {
     await p;
     expect(provider).toHaveBeenCalledTimes(1);
 
-    // Refresh timer fires at exp - 30s = +90s and closes the socket
+    // Refresh timer fires at exp - 30s = +90s and sends a reauth frame
     await vi.advanceTimersByTimeAsync(90_000);
-    expect(sockets[0].closedWith?.reason).toBe("token_refresh");
+    expect(provider).toHaveBeenCalledTimes(2);
+    const reauthMsg = getWs().sent.find((m) => m.type === "reauth");
+    expect(reauthMsg).toBeTruthy();
+    expect(typeof reauthMsg.token).toBe("string");
 
-    // Immediate reconnect with a freshly minted token, no backoff delay
+    // Broker accepts: same socket, no close, no disconnect event
+    getWs().receive({ type: "reauth", success: true });
+    await tick();
+    expect(sockets.length).toBe(1);
+    expect(sockets[0].closedWith).toBeNull();
+    expect(disconnects).toEqual([]);
+    expect(client.connected).toBe(true);
+
+    // The cycle re-arms: another refresh fires ~90s later
+    await vi.advanceTimersByTimeAsync(90_000);
+    expect(provider).toHaveBeenCalledTimes(3);
+    expect(getWs().sent.filter((m) => m.type === "reauth").length).toBe(2);
+  });
+
+  it("falls back to reconnect when the broker rejects reauth", async () => {
+    let calls = 0;
+    const provider = vi.fn(() =>
+      makeJwt({ sub: "at_live_x", exp: Math.floor(Date.now() / 1000) + 120, n: ++calls })
+    );
+    const { client, sockets, getWs } = makeClient(provider, { reconnect: true });
+
+    const p = client.connect();
+    await tick();
+    await completeAuth(getWs());
+    await p;
+
+    await vi.advanceTimersByTimeAsync(90_000);
+    getWs().receive({ type: "reauth", success: false, error: "token_invalid" });
+    await tick();
+
+    // Reconnect fallback: socket closed for refresh, new socket, reconnect flag
+    expect(sockets[0].closedWith?.reason).toBe("token_refresh");
     expect(sockets.length).toBe(2);
     await completeAuth(getWs());
-
-    expect(provider).toHaveBeenCalledTimes(2);
     const authMsg = getWs().sent.find((m) => m.type === "auth");
     expect(authMsg.reconnect).toBe(true);
-    expect(disconnects).toEqual([]);
+    expect(client.connected).toBe(true);
+  });
+
+  it("falls back to reconnect when the broker never answers (old broker)", async () => {
+    let calls = 0;
+    const provider = vi.fn(() =>
+      makeJwt({ sub: "at_live_x", exp: Math.floor(Date.now() / 1000) + 120, n: ++calls })
+    );
+    const { client, sockets, getWs } = makeClient(provider, { reconnect: true });
+
+    const p = client.connect();
+    await tick();
+    await completeAuth(getWs());
+    await p;
+
+    await vi.advanceTimersByTimeAsync(90_000);
+    expect(getWs().sent.find((m) => m.type === "reauth")).toBeTruthy();
+
+    // No response: the 10s reauth timeout fires, then reconnect fallback
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(sockets[0].closedWith?.reason).toBe("token_refresh");
+    expect(sockets.length).toBe(2);
+    await completeAuth(getWs());
     expect(client.connected).toBe(true);
   });
 
