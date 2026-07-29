@@ -1776,6 +1776,8 @@ let NoLag$1 = class NoLag {
         this._reconnectTimer = null;
         this._heartbeatTimer = null;
         this._isReconnecting = false; // True when reconnecting after disconnect, false on fresh connect
+        this._tokenRefreshTimer = null;
+        this._pendingTokenRefresh = false; // True while a proactive refresh close/reconnect is in flight
         // Actor info (populated after auth)
         this._actorTokenId = null;
         this._projectId = null;
@@ -1800,8 +1802,10 @@ let NoLag$1 = class NoLag {
         // Event handlers (local - for routing messages to callbacks)
         this._eventHandlers = new Map();
         this._createWebSocket = createWebSocket;
+        this._tokenOrProvider = token;
         this._options = {
-            token,
+            // Last-resolved token; provider results land here on each connect
+            token: typeof token === "string" ? token : "",
             url: options?.url ?? DEFAULT_URL,
             actorTokenId: options?.actorTokenId,
             reconnect: options?.reconnect ?? true,
@@ -1910,6 +1914,8 @@ let NoLag$1 = class NoLag {
                         this._emitEvent("connect");
                         // Start heartbeat
                         this._startHeartbeat();
+                        // Proactively refresh client tokens (JWTs) before they expire
+                        this._scheduleTokenRefresh();
                         // Restore presence (client-side only, not persisted on server)
                         if (this._presence) {
                             this._sendPresence(this._presence);
@@ -1930,6 +1936,39 @@ let NoLag$1 = class NoLag {
                     this._status = "disconnected";
                     this._ws = null;
                     this._stopHeartbeat();
+                    this._clearTokenRefresh();
+                    // Proactive client-token refresh: reconnect immediately with a
+                    // freshly minted token; the server restores subscriptions. No
+                    // disconnect event - this is routine token rotation.
+                    if (this._pendingTokenRefresh) {
+                        this._pendingTokenRefresh = false;
+                        this._reconnectAttempts = 0;
+                        this._isReconnecting = true;
+                        this._status = "reconnecting";
+                        this._log("Reconnecting with refreshed client token");
+                        this.connect().catch((err) => {
+                            this._log("Token refresh reconnect failed:", err);
+                        });
+                        return;
+                    }
+                    // Server closed because the client token expired (4003):
+                    // reconnect immediately without backoff so a token provider can
+                    // mint a fresh token. Without a provider, the retry fails auth
+                    // and falls back to the normal backoff path.
+                    if (event?.code === 4003) {
+                        this._reconnectAttempts = 0;
+                        if (wasConnected) {
+                            this._emitEvent("disconnect", "token_expired");
+                        }
+                        if (this._options.reconnect) {
+                            this._isReconnecting = true;
+                            this._status = "reconnecting";
+                            this.connect().catch((err) => {
+                                this._log("Reconnect after token expiry failed:", err);
+                            });
+                        }
+                        return;
+                    }
                     if (wasConnected) {
                         this._emitEvent("disconnect", event?.reason || "Connection closed");
                     }
@@ -1960,6 +1999,8 @@ let NoLag$1 = class NoLag {
         const wasConnected = this._status === "connected";
         this._options.reconnect = false; // Prevent auto-reconnect
         this._stopHeartbeat();
+        this._clearTokenRefresh();
+        this._pendingTokenRefresh = false;
         if (this._reconnectTimer) {
             clearTimeout(this._reconnectTimer);
             this._reconnectTimer = null;
@@ -2335,29 +2376,89 @@ let NoLag$1 = class NoLag {
             };
             // Temporarily store handler
             this._authHandler = authHandler;
-            // Only include reconnect flag when true (reconnecting after disconnect)
-            // Absence of reconnect flag = fresh connect (no subscription restoration)
-            const authMessage = {
-                type: "auth",
-                token: this._options.token,
-                protocolVersion: PROTOCOL_VERSION,
-            };
-            if (this._isReconnecting) {
-                authMessage.reconnect = true;
-            }
-            // Include projectId for debug logging (pre-auth events)
-            if (this._options.projectId) {
-                authMessage.projectId = this._options.projectId;
-            }
-            try {
+            // Resolve the token: providers are invoked on EVERY connect and
+            // reconnect so each attempt authenticates with a fresh client token
+            const tokenOrProvider = this._tokenOrProvider;
+            Promise.resolve(typeof tokenOrProvider === "function" ? tokenOrProvider() : tokenOrProvider)
+                .then((token) => {
+                this._options.token = token;
+                // Only include reconnect flag when true (reconnecting after disconnect)
+                // Absence of reconnect flag = fresh connect (no subscription restoration)
+                const authMessage = {
+                    type: "auth",
+                    token,
+                    protocolVersion: PROTOCOL_VERSION,
+                };
+                if (this._isReconnecting) {
+                    authMessage.reconnect = true;
+                }
+                // Include projectId for debug logging (pre-auth events)
+                if (this._options.projectId) {
+                    authMessage.projectId = this._options.projectId;
+                }
                 this._send(authMessage, { op: "auth" });
-            }
-            catch (e) {
+            })
+                .catch((e) => {
                 clearTimeout(timeout);
                 delete this._authHandler;
-                reject(e);
-            }
+                reject(e instanceof Error ? e : new Error(String(e)));
+            });
         });
+    }
+    /**
+     * Decode the exp claim (unix seconds) from a JWT without verifying it.
+     * Returns null for opaque tokens or anything that does not parse.
+     */
+    _decodeJwtExp(token) {
+        if (!token.startsWith("eyJ"))
+            return null;
+        const parts = token.split(".");
+        if (parts.length !== 3)
+            return null;
+        try {
+            const base64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+            const padded = base64 + "=".repeat((4 - (base64.length % 4)) % 4);
+            const binary = typeof atob === "function"
+                ? atob(padded)
+                : Buffer.from(padded, "base64").toString("latin1");
+            const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
+            const payload = JSON.parse(new TextDecoder().decode(bytes));
+            return typeof payload.exp === "number" ? payload.exp : null;
+        }
+        catch {
+            return null;
+        }
+    }
+    /**
+     * Schedule a proactive refresh-reconnect shortly before a client token
+     * (JWT) expires. Only armed when a token provider is available to mint
+     * a fresh token; static-string JWTs simply expire (4003).
+     */
+    _scheduleTokenRefresh() {
+        this._clearTokenRefresh();
+        if (typeof this._tokenOrProvider !== "function")
+            return;
+        const exp = this._decodeJwtExp(this._options.token);
+        if (exp === null)
+            return;
+        const delay = Math.max(exp * 1000 - Date.now() - 30000, 5000);
+        this._log(`Client token expires at ${exp}, refresh-reconnect in ${delay}ms`);
+        this._tokenRefreshTimer = setTimeout(() => {
+            this._tokenRefreshTimer = null;
+            if (!this._ws || this._status !== "connected")
+                return;
+            this._log("Refreshing client token via reconnect");
+            this._pendingTokenRefresh = true;
+            // onClose drives the immediate reconnect; the provider mints a fresh
+            // token and the server restores subscriptions (reconnect: true)
+            this._ws.close(1000, "token_refresh");
+        }, delay);
+    }
+    _clearTokenRefresh() {
+        if (this._tokenRefreshTimer) {
+            clearTimeout(this._tokenRefreshTimer);
+            this._tokenRefreshTimer = null;
+        }
     }
     _sendPresence(data, callback) {
         this._trySend({ type: "presence", data }, { op: "presence" });
@@ -3179,6 +3280,29 @@ class RoomsApi {
     async delete(appId, roomId) {
         await this._api.request("DELETE", `/apps/${appId}/rooms/${roomId}`);
     }
+    /**
+     * Grant an actor access to a room (room-level ACL).
+     *
+     * The first grant makes the room private — after that the broker only admits
+     * actors with an explicit, unexpired grant. Pass `actorTokenId` (a token in
+     * this project) or `actorType` (a type label). Use this to make a room (e.g.
+     * a per-user notification bell) genuinely private.
+     */
+    async grantActor(appId, roomId, data) {
+        return this._api.request("POST", `/apps/${appId}/rooms/${roomId}/actors`, data);
+    }
+    /**
+     * List a room's actor grants
+     */
+    async listActors(appId, roomId) {
+        return this._api.request("GET", `/apps/${appId}/rooms/${roomId}/actors`);
+    }
+    /**
+     * Revoke an actor's room access. Removing the last grant makes the room public again.
+     */
+    async revokeActor(appId, roomId, roomActorAccessId) {
+        await this._api.request("DELETE", `/apps/${appId}/rooms/${roomId}/actors/${roomActorAccessId}`);
+    }
 }
 // ============ Actors API ============
 class ActorsApi {
@@ -3850,6 +3974,9 @@ class WebRTCManager {
  */
 /**
  * Create a NoLag client for Node.js
+ *
+ * Pass an access token string, or a TokenProvider function that returns a
+ * short-lived client token (JWT) minted by your backend.
  */
 const NoLag = (token, options) => {
     return new NoLag$1(createWebSocket, token, options);

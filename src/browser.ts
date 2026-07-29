@@ -5,7 +5,7 @@
 
 import { NoLag as NoLagClient } from "./client";
 import { createWebSocket } from "./websocket/browser";
-import type { NoLagOptions } from "./types";
+import type { NoLagOptions, TokenProvider } from "./types";
 
 export { NoLagSocket } from "./client";
 
@@ -13,6 +13,7 @@ export { NoLagSocket } from "./client";
 export type {
   QoS,
   NoLagOptions,
+  TokenProvider,
   ConnectionStatus,
   ActorType,
   Permission,
@@ -54,8 +55,12 @@ export type { WebRTCOptions, WebRTCEvent, WebRTCEvents } from "./webrtc";
 
 /**
  * Create a NoLag client for Browser/React Native
+ *
+ * Pass an access token string, or (recommended for browsers) a TokenProvider
+ * function that returns a short-lived client token (JWT) minted by your
+ * backend. Never ship a long-lived actor access token to the browser.
  */
-export const NoLag = (token: string, options?: NoLagOptions): NoLagClient => {
+export const NoLag = (token: string | TokenProvider, options?: NoLagOptions): NoLagClient => {
   return new NoLagClient(createWebSocket, token, options);
 };
 

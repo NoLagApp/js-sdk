@@ -36,6 +36,7 @@ import {
   ReplayEndEvent,
   ReplayStartHandler,
   ReplayEndHandler,
+  TokenProvider,
 } from "./types";
 import { IUnifiedWebSocket, WebSocketFactory, WS_READY_STATE } from "./websocket/types";
 
@@ -109,6 +110,11 @@ export class NoLag {
   private _heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private _isReconnecting = false; // True when reconnecting after disconnect, false on fresh connect
 
+  // Client-token (JWT) support: original token or provider, refresh scheduling
+  private _tokenOrProvider: string | TokenProvider;
+  private _tokenRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  private _pendingTokenRefresh = false; // True while a proactive refresh close/reconnect is in flight
+
   // Actor info (populated after auth)
   private _actorTokenId: string | null = null;
   private _projectId: string | null = null;
@@ -141,12 +147,14 @@ export class NoLag {
 
   constructor(
     createWebSocket: WebSocketFactory,
-    token: string,
+    token: string | TokenProvider,
     options?: NoLagOptions
   ) {
     this._createWebSocket = createWebSocket;
+    this._tokenOrProvider = token;
     this._options = {
-      token,
+      // Last-resolved token; provider results land here on each connect
+      token: typeof token === "string" ? token : "",
       url: options?.url ?? DEFAULT_URL,
       actorTokenId: options?.actorTokenId,
       reconnect: options?.reconnect ?? true,
@@ -274,6 +282,9 @@ export class NoLag {
               // Start heartbeat
               this._startHeartbeat();
 
+              // Proactively refresh client tokens (JWTs) before they expire
+              this._scheduleTokenRefresh();
+
               // Restore presence (client-side only, not persisted on server)
               if (this._presence) {
                 this._sendPresence(this._presence);
@@ -298,6 +309,41 @@ export class NoLag {
           this._ws = null;
 
           this._stopHeartbeat();
+          this._clearTokenRefresh();
+
+          // Proactive client-token refresh: reconnect immediately with a
+          // freshly minted token; the server restores subscriptions. No
+          // disconnect event - this is routine token rotation.
+          if (this._pendingTokenRefresh) {
+            this._pendingTokenRefresh = false;
+            this._reconnectAttempts = 0;
+            this._isReconnecting = true;
+            this._status = "reconnecting";
+            this._log("Reconnecting with refreshed client token");
+            this.connect().catch((err) => {
+              this._log("Token refresh reconnect failed:", err);
+            });
+            return;
+          }
+
+          // Server closed because the client token expired (4003):
+          // reconnect immediately without backoff so a token provider can
+          // mint a fresh token. Without a provider, the retry fails auth
+          // and falls back to the normal backoff path.
+          if (event?.code === 4003) {
+            this._reconnectAttempts = 0;
+            if (wasConnected) {
+              this._emitEvent("disconnect", "token_expired");
+            }
+            if (this._options.reconnect) {
+              this._isReconnecting = true;
+              this._status = "reconnecting";
+              this.connect().catch((err) => {
+                this._log("Reconnect after token expiry failed:", err);
+              });
+            }
+            return;
+          }
 
           if (wasConnected) {
             this._emitEvent("disconnect", event?.reason || "Connection closed");
@@ -333,6 +379,8 @@ export class NoLag {
     this._options.reconnect = false; // Prevent auto-reconnect
 
     this._stopHeartbeat();
+    this._clearTokenRefresh();
+    this._pendingTokenRefresh = false;
 
     if (this._reconnectTimer) {
       clearTimeout(this._reconnectTimer);
@@ -787,28 +835,94 @@ export class NoLag {
       // Temporarily store handler
       (this as any)._authHandler = authHandler;
 
-      // Only include reconnect flag when true (reconnecting after disconnect)
-      // Absence of reconnect flag = fresh connect (no subscription restoration)
-      const authMessage: { type: string; token: string; reconnect?: boolean; projectId?: string; protocolVersion: number } = {
-        type: "auth",
-        token: this._options.token,
-        protocolVersion: PROTOCOL_VERSION,
-      };
-      if (this._isReconnecting) {
-        authMessage.reconnect = true;
-      }
-      // Include projectId for debug logging (pre-auth events)
-      if (this._options.projectId) {
-        authMessage.projectId = this._options.projectId;
-      }
-      try {
-        this._send(authMessage, { op: "auth" });
-      } catch (e) {
-        clearTimeout(timeout);
-        delete (this as any)._authHandler;
-        reject(e as Error);
-      }
+      // Resolve the token: providers are invoked on EVERY connect and
+      // reconnect so each attempt authenticates with a fresh client token
+      const tokenOrProvider = this._tokenOrProvider;
+      Promise.resolve(
+        typeof tokenOrProvider === "function" ? tokenOrProvider() : tokenOrProvider
+      )
+        .then((token) => {
+          this._options.token = token;
+
+          // Only include reconnect flag when true (reconnecting after disconnect)
+          // Absence of reconnect flag = fresh connect (no subscription restoration)
+          const authMessage: { type: string; token: string; reconnect?: boolean; projectId?: string; protocolVersion: number } = {
+            type: "auth",
+            token,
+            protocolVersion: PROTOCOL_VERSION,
+          };
+          if (this._isReconnecting) {
+            authMessage.reconnect = true;
+          }
+          // Include projectId for debug logging (pre-auth events)
+          if (this._options.projectId) {
+            authMessage.projectId = this._options.projectId;
+          }
+          this._send(authMessage, { op: "auth" });
+        })
+        .catch((e) => {
+          clearTimeout(timeout);
+          delete (this as any)._authHandler;
+          reject(e instanceof Error ? e : new Error(String(e)));
+        });
     });
+  }
+
+  /**
+   * Decode the exp claim (unix seconds) from a JWT without verifying it.
+   * Returns null for opaque tokens or anything that does not parse.
+   */
+  private _decodeJwtExp(token: string): number | null {
+    if (!token.startsWith("eyJ")) return null;
+    const parts = token.split(".");
+    if (parts.length !== 3) return null;
+    try {
+      const base64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+      const padded = base64 + "=".repeat((4 - (base64.length % 4)) % 4);
+      const binary =
+        typeof atob === "function"
+          ? atob(padded)
+          : Buffer.from(padded, "base64").toString("latin1");
+      const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
+      const payload = JSON.parse(new TextDecoder().decode(bytes));
+      return typeof payload.exp === "number" ? payload.exp : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Schedule a proactive refresh-reconnect shortly before a client token
+   * (JWT) expires. Only armed when a token provider is available to mint
+   * a fresh token; static-string JWTs simply expire (4003).
+   */
+  private _scheduleTokenRefresh(): void {
+    this._clearTokenRefresh();
+
+    if (typeof this._tokenOrProvider !== "function") return;
+
+    const exp = this._decodeJwtExp(this._options.token);
+    if (exp === null) return;
+
+    const delay = Math.max(exp * 1000 - Date.now() - 30_000, 5_000);
+    this._log(`Client token expires at ${exp}, refresh-reconnect in ${delay}ms`);
+
+    this._tokenRefreshTimer = setTimeout(() => {
+      this._tokenRefreshTimer = null;
+      if (!this._ws || this._status !== "connected") return;
+      this._log("Refreshing client token via reconnect");
+      this._pendingTokenRefresh = true;
+      // onClose drives the immediate reconnect; the provider mints a fresh
+      // token and the server restores subscriptions (reconnect: true)
+      this._ws.close(1000, "token_refresh");
+    }, delay);
+  }
+
+  private _clearTokenRefresh(): void {
+    if (this._tokenRefreshTimer) {
+      clearTimeout(this._tokenRefreshTimer);
+      this._tokenRefreshTimer = null;
+    }
   }
 
   private _sendPresence(data: PresenceData, callback?: AckCallback): void {
