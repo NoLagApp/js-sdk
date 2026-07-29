@@ -218,6 +218,18 @@ export declare class NoLag {
      * a fresh token; static-string JWTs simply expire (4003).
      */
     private _scheduleTokenRefresh;
+    /**
+     * Renew the client token. Preferred path: in-band `reauth` over the live
+     * connection (nothing drops, no resubscribe). Fallback (older brokers or
+     * transient failures): the reconnect flow, where the provider mints a
+     * fresh token and the server restores subscriptions.
+     */
+    private _refreshToken;
+    private _refreshViaReconnect;
+    /** Send a reauth frame and resolve with the broker's verdict.
+     *  Resolves false on failure, timeout, or brokers without reauth support
+     *  (they ignore the unknown frame and the timeout fires). */
+    private _sendReauth;
     private _clearTokenRefresh;
     private _sendPresence;
     private _send;
