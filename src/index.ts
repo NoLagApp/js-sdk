@@ -46,6 +46,17 @@ export type {
 
 export type { WebSocketFactory, IUnifiedWebSocket } from "./websocket/types";
 
+// Platform adapters (app lifecycle / network reachability)
+export type {
+  AppLifecycleState,
+  LifecycleAdapter,
+  NetworkAdapter,
+} from "./adapters";
+export {
+  createDocumentLifecycleAdapter,
+  createWindowNetworkAdapter,
+} from "./adapters";
+
 // Export REST API client
 export { NoLagApi, NoLagApiError } from "./api";
 export * from "./api-types";

@@ -7,6 +7,7 @@ import { NoLag as NoLagClient } from "./client";
 import { createWebSocket } from "./websocket/browser";
 import type { NoLagOptions, TokenProvider } from "./types";
 
+export { NoLagEncodeError, NoLagServerError } from "./errors";
 export { NoLagSocket } from "./client";
 
 // Explicitly re-export all types for better compatibility with NodeNext resolution
@@ -44,6 +45,17 @@ export type {
 } from "./types";
 
 export type { WebSocketFactory, IUnifiedWebSocket } from "./websocket/types";
+
+// Platform adapters (app lifecycle / network reachability)
+export type {
+  AppLifecycleState,
+  LifecycleAdapter,
+  NetworkAdapter,
+} from "./adapters";
+export {
+  createDocumentLifecycleAdapter,
+  createWindowNetworkAdapter,
+} from "./adapters";
 
 // Export REST API client
 export { NoLagApi, NoLagApiError } from "./api";

@@ -1,5 +1,3 @@
-import WebSocket from 'ws';
-
 function utf8Count(str) {
     const strLength = str.length;
     let byteLength = 0;
@@ -3354,30 +3352,25 @@ class App {
     }
 }
 
-/**
- * Node.js WebSocket implementation
- * Uses the 'ws' package
- */
 const createWebSocket = (url) => {
     const ws = new WebSocket(url);
+    ws.binaryType = "arraybuffer";
     let onOpenCallback;
     let onMessageCallback;
     let onCloseCallback;
     let onErrorCallback;
-    ws.on("open", (event) => {
+    ws.onopen = (event) => {
         onOpenCallback?.(event);
-    });
-    ws.on("message", (data) => {
-        // Convert Buffer to ArrayBuffer for consistency
-        const arrayBuffer = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
-        onMessageCallback?.(arrayBuffer);
-    });
-    ws.on("close", (code, reason) => {
-        onCloseCallback?.({ code, reason: reason.toString() });
-    });
-    ws.on("error", (error) => {
-        onErrorCallback?.(error);
-    });
+    };
+    ws.onmessage = (event) => {
+        onMessageCallback?.(event.data);
+    };
+    ws.onclose = (event) => {
+        onCloseCallback?.(event);
+    };
+    ws.onerror = (event) => {
+        onErrorCallback?.(event);
+    };
     return {
         send(data) {
             ws.send(data);
@@ -3734,589 +3727,48 @@ class ScopesApi {
 }
 
 /**
- * WebRTC Environment Detection and Polyfill
- *
- * Provides RTCPeerConnection for both browser and Node.js environments.
- * In Node.js, requires the 'wrtc' package to be installed.
- */
-// Cached wrtc module
-let wrtcModule = null;
-let wrtcLoadAttempted = false;
-/**
- * Check if running in a browser environment
- */
-function isBrowser() {
-    return (typeof window !== "undefined" &&
-        typeof window.RTCPeerConnection !== "undefined");
-}
-/**
- * Check if running in Node.js environment
- */
-function isNode() {
-    return (typeof process !== "undefined" &&
-        process.versions != null &&
-        process.versions.node != null);
-}
-/**
- * Try to load the wrtc module (Node.js only)
- */
-function tryLoadWrtc() {
-    if (wrtcLoadAttempted) {
-        return wrtcModule;
-    }
-    wrtcLoadAttempted = true;
-    if (!isNode()) {
-        return null;
-    }
-    try {
-        // Dynamic import for Node.js
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
-        wrtcModule = require("wrtc");
-        return wrtcModule;
-    }
-    catch {
-        // wrtc not installed
-        return null;
-    }
-}
-/**
- * Get RTCPeerConnection constructor for the current environment
- * @throws Error if WebRTC is not available
- */
-function getRTCPeerConnection() {
-    // Browser environment
-    if (isBrowser()) {
-        return window.RTCPeerConnection;
-    }
-    // Node.js environment - try wrtc
-    const wrtc = tryLoadWrtc();
-    if (wrtc) {
-        return wrtc.RTCPeerConnection;
-    }
-    throw new Error("WebRTC is not available. In Node.js, install the 'wrtc' package: npm install wrtc");
-}
-/**
- * Get MediaStream constructor for the current environment
- * @throws Error if MediaStream is not available
- */
-function getMediaStream() {
-    // Browser environment
-    if (isBrowser()) {
-        return window.MediaStream;
-    }
-    // Node.js environment - try wrtc
-    const wrtc = tryLoadWrtc();
-    if (wrtc) {
-        return wrtc.MediaStream;
-    }
-    throw new Error("MediaStream is not available. In Node.js, install the 'wrtc' package: npm install wrtc");
-}
-/**
- * Check if WebRTC is available in the current environment
- */
-function isWebRTCAvailable() {
-    if (isBrowser()) {
-        return typeof window.RTCPeerConnection !== "undefined";
-    }
-    if (isNode()) {
-        const wrtc = tryLoadWrtc();
-        return wrtc !== null;
-    }
-    return false;
-}
-
-/**
- * WebRTC Manager for NoLag SDK
- *
- * Provides peer-to-peer video/audio connections using NoLag as the signaling server.
- * Uses the "Perfect Negotiation" pattern to handle offer collisions gracefully.
- *
- * Works in both browser and Node.js environments. In Node.js, requires the 'wrtc' package:
- * ```bash
- * npm install wrtc
- * ```
- *
- * @example Browser
- * ```typescript
- * const client = NoLag(token);
- * await client.connect();
- *
- * const webrtc = new WebRTCManager(client, {
- *   app: 'video-chat',
- *   room: 'meeting-123',
- *   iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
- * });
- *
- * const localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
- * webrtc.setLocalStream(localStream);
- *
- * webrtc.on('peerConnected', (actorId, stream) => {
- *   // Attach stream to video element
- * });
- *
- * await webrtc.start();
- * ```
- *
- * @example Node.js (AI Voice Bot)
- * ```typescript
- * import { NoLag, WebRTCManager } from '@nolag/js-sdk';
- * import wrtc from 'wrtc';
- *
- * const client = NoLag(token);
- * await client.connect();
- *
- * const webrtc = new WebRTCManager(client, {
- *   app: 'video-chat',
- *   room: 'meeting-123'
- * });
- *
- * webrtc.on('peerConnected', (actorId, stream) => {
- *   // Process incoming audio with speech-to-text
- * });
- *
- * await webrtc.start();
- * ```
- */
-// Default STUN servers (free, public)
-const DEFAULT_ICE_SERVERS = [
-    { urls: "stun:stun.l.google.com:19302" },
-    { urls: "stun:stun1.l.google.com:19302" },
-];
-/**
- * WebRTC Manager
- *
- * Manages peer-to-peer WebRTC connections using NoLag for signaling.
- */
-class WebRTCManager {
-    constructor(client, options) {
-        this._localStream = null;
-        this._peers = new Map();
-        this._started = false;
-        this._eventHandlers = new Map();
-        // Bound handlers for cleanup
-        this._boundHandlers = {};
-        // Verify WebRTC is available in this environment
-        if (!isWebRTCAvailable()) {
-            if (isNode()) {
-                throw new Error("WebRTC is not available. Install the 'wrtc' package: npm install wrtc");
-            }
-            else {
-                throw new Error("WebRTC is not available in this browser. Please use a modern browser with WebRTC support.");
-            }
-        }
-        this._client = client;
-        this._options = {
-            iceServers: options.iceServers ?? DEFAULT_ICE_SERVERS,
-            app: options.app,
-            room: options.room,
-        };
-        // Create room context for room-scoped presence
-        this._room = client.setApp(options.app).setRoom(options.room);
-    }
-    // ============ Public API ============
-    /**
-     * Get the topic prefix for this room
-     */
-    get topicPrefix() {
-        return `${this._options.app}/${this._options.room}`;
-    }
-    /**
-     * Get the local actor ID
-     */
-    get myActorId() {
-        return this._client.actorId;
-    }
-    /**
-     * Check if manager is started
-     */
-    get isStarted() {
-        return this._started;
-    }
-    /**
-     * Set the local media stream to share with peers
-     */
-    setLocalStream(stream) {
-        this._localStream = stream;
-        this._emit("localStream", stream);
-        // Add tracks to existing peer connections
-        for (const peer of this._peers.values()) {
-            this._addTracksToConnection(peer.pc, stream);
-        }
-    }
-    /**
-     * Get the local media stream
-     */
-    getLocalStream() {
-        return this._localStream;
-    }
-    /**
-     * Get a peer's remote stream
-     */
-    getRemoteStream(actorId) {
-        return this._peers.get(actorId)?.remoteStream;
-    }
-    /**
-     * Get list of connected peer IDs
-     */
-    getPeers() {
-        return Array.from(this._peers.keys());
-    }
-    /**
-     * Check if connected to a specific peer
-     */
-    isConnected(actorId) {
-        const peer = this._peers.get(actorId);
-        return peer?.pc.connectionState === "connected";
-    }
-    /**
-     * Start the WebRTC manager
-     *
-     * - Subscribes to signaling topics
-     * - Listens for presence events
-     * - Initiates connections to existing peers
-     */
-    async start() {
-        if (this._started) {
-            throw new Error("WebRTCManager already started");
-        }
-        if (!this._client.connected) {
-            throw new Error("NoLag client not connected");
-        }
-        if (!this.myActorId) {
-            throw new Error("Actor ID not available");
-        }
-        this._started = true;
-        // Create bound handlers for cleanup later
-        this._boundHandlers = {
-            onPresenceJoin: (actor) => this._onPresenceJoin(actor),
-            onPresenceLeave: (actor) => this._onPresenceLeave(actor),
-            onOffer: (data, meta) => this._handleOffer(data, meta),
-            onAnswer: (data, meta) => this._handleAnswer(data, meta),
-            onCandidate: (data, meta) => this._handleCandidate(data, meta),
-        };
-        // Subscribe to signaling topics
-        // Note: Using colons instead of slashes because topic names can't contain
-        // forward slashes (they're used as path separators in app/room/topic pattern)
-        const topics = ["webrtc:offer", "webrtc:answer", "webrtc:candidate"];
-        for (const topic of topics) {
-            this._client.subscribe(`${this.topicPrefix}/${topic}`);
-        }
-        // Listen to signaling messages
-        this._client.on(`${this.topicPrefix}/webrtc:offer`, this._boundHandlers.onOffer);
-        this._client.on(`${this.topicPrefix}/webrtc:answer`, this._boundHandlers.onAnswer);
-        this._client.on(`${this.topicPrefix}/webrtc:candidate`, this._boundHandlers.onCandidate);
-        // Listen to presence events
-        this._client.on("presence:join", this._boundHandlers.onPresenceJoin);
-        this._client.on("presence:leave", this._boundHandlers.onPresenceLeave);
-        // Set presence with webrtcReady flag (room-scoped)
-        this._room.setPresence({
-            webrtcReady: true,
-        });
-        // Fetch current presence and connect to existing WebRTC-ready peers
-        try {
-            const presenceList = await this._room.fetchPresence();
-            for (const actor of presenceList) {
-                if (actor.actorTokenId !== this.myActorId &&
-                    actor.presence?.webrtcReady) {
-                    await this._createPeerConnection(actor.actorTokenId);
-                }
-            }
-        }
-        catch (err) {
-            // Presence fetch failed, we'll connect as peers join
-            console.warn("Failed to fetch initial presence:", err);
-        }
-    }
-    /**
-     * Stop the WebRTC manager
-     *
-     * - Closes all peer connections
-     * - Unsubscribes from signaling topics
-     * - Removes event listeners
-     */
-    stop() {
-        if (!this._started)
-            return;
-        this._started = false;
-        // Close all peer connections
-        for (const [actorId, peer] of this._peers) {
-            peer.pc.close();
-            this._emit("peerDisconnected", actorId);
-        }
-        this._peers.clear();
-        // Unsubscribe from signaling topics
-        const topics = ["webrtc:offer", "webrtc:answer", "webrtc:candidate"];
-        for (const topic of topics) {
-            this._client.unsubscribe(`${this.topicPrefix}/${topic}`);
-        }
-        // Remove message handlers
-        if (this._boundHandlers.onOffer) {
-            this._client.off(`${this.topicPrefix}/webrtc:offer`, this._boundHandlers.onOffer);
-        }
-        if (this._boundHandlers.onAnswer) {
-            this._client.off(`${this.topicPrefix}/webrtc:answer`, this._boundHandlers.onAnswer);
-        }
-        if (this._boundHandlers.onCandidate) {
-            this._client.off(`${this.topicPrefix}/webrtc:candidate`, this._boundHandlers.onCandidate);
-        }
-        // Remove presence handlers
-        if (this._boundHandlers.onPresenceJoin) {
-            this._client.off("presence:join", this._boundHandlers.onPresenceJoin);
-        }
-        if (this._boundHandlers.onPresenceLeave) {
-            this._client.off("presence:leave", this._boundHandlers.onPresenceLeave);
-        }
-        // Clear presence webrtcReady flag (room-scoped)
-        this._room.setPresence({
-            webrtcReady: false,
-        });
-        this._boundHandlers = {};
-    }
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    on(event, handler) {
-        if (!this._eventHandlers.has(event)) {
-            this._eventHandlers.set(event, new Set());
-        }
-        this._eventHandlers.get(event).add(handler);
-        return this;
-    }
-    /**
-     * Remove an event handler
-     */
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    off(event, handler) {
-        if (handler) {
-            this._eventHandlers.get(event)?.delete(handler);
-        }
-        else {
-            this._eventHandlers.delete(event);
-        }
-        return this;
-    }
-    // ============ Private Methods ============
-    _emit(event, ...args) {
-        const handlers = this._eventHandlers.get(event);
-        if (handlers) {
-            for (const handler of handlers) {
-                try {
-                    handler(...args);
-                }
-                catch (e) {
-                    console.error(`Error in WebRTC event handler for ${event}:`, e);
-                }
-            }
-        }
-    }
-    _onPresenceJoin(actor) {
-        if (actor.actorTokenId !== this.myActorId &&
-            actor.presence?.webrtcReady &&
-            !this._peers.has(actor.actorTokenId)) {
-            this._createPeerConnection(actor.actorTokenId).catch((err) => {
-                this._emit("error", err);
-            });
-        }
-    }
-    _onPresenceLeave(actor) {
-        const peer = this._peers.get(actor.actorTokenId);
-        if (peer) {
-            peer.pc.close();
-            this._peers.delete(actor.actorTokenId);
-            this._emit("peerDisconnected", actor.actorTokenId);
-        }
-    }
-    async _createPeerConnection(remoteActorId) {
-        const config = {
-            iceServers: this._options.iceServers,
-        };
-        // Get RTCPeerConnection for current environment (browser or Node.js with wrtc)
-        const RTCPeerConnectionImpl = getRTCPeerConnection();
-        const pc = new RTCPeerConnectionImpl(config);
-        // Determine politeness for perfect negotiation
-        // Lower actorId is "polite" and will yield on collision
-        const polite = this.myActorId < remoteActorId;
-        const peerState = {
-            actorId: remoteActorId,
-            pc,
-            polite,
-            makingOffer: false,
-            ignoreOffer: false,
-        };
-        this._peers.set(remoteActorId, peerState);
-        // Add local tracks if available
-        if (this._localStream) {
-            this._addTracksToConnection(pc, this._localStream);
-        }
-        // Handle ICE candidates
-        pc.onicecandidate = ({ candidate }) => {
-            if (candidate) {
-                this._sendCandidate(remoteActorId, candidate.toJSON());
-            }
-        };
-        // Handle remote tracks
-        pc.ontrack = ({ track, streams }) => {
-            let stream = streams[0];
-            if (!stream) {
-                // Create MediaStream for current environment (browser or Node.js with wrtc)
-                const MediaStreamImpl = getMediaStream();
-                stream = new MediaStreamImpl([track]);
-            }
-            peerState.remoteStream = stream;
-            this._emit("peerTrack", remoteActorId, track, stream);
-            this._emit("peerConnected", remoteActorId, stream);
-        };
-        // Handle negotiation needed (perfect negotiation pattern)
-        pc.onnegotiationneeded = async () => {
-            try {
-                peerState.makingOffer = true;
-                await pc.setLocalDescription();
-                this._sendOffer(remoteActorId, pc.localDescription);
-            }
-            catch (err) {
-                this._emit("error", err);
-            }
-            finally {
-                peerState.makingOffer = false;
-            }
-        };
-        // Handle connection state changes
-        pc.onconnectionstatechange = () => {
-            if (pc.connectionState === "disconnected" ||
-                pc.connectionState === "failed" ||
-                pc.connectionState === "closed") {
-                this._peers.delete(remoteActorId);
-                this._emit("peerDisconnected", remoteActorId);
-            }
-        };
-        // Handle ICE connection state for debugging
-        pc.oniceconnectionstatechange = () => {
-            if (pc.iceConnectionState === "failed") {
-                // ICE restart could be attempted here
-                console.warn(`ICE connection failed for peer ${remoteActorId}`);
-            }
-        };
-        return peerState;
-    }
-    async _handleOffer(data, meta) {
-        // Check if this offer is for us
-        if (data.targetActorId !== this.myActorId)
-            return;
-        const senderActorId = data.senderActorId;
-        if (!senderActorId)
-            return;
-        let peer = this._peers.get(senderActorId);
-        if (!peer) {
-            peer = await this._createPeerConnection(senderActorId);
-        }
-        const { pc, makingOffer, polite } = peer;
-        // Perfect negotiation: handle offer collision
-        const offerCollision = makingOffer || pc.signalingState !== "stable";
-        peer.ignoreOffer = !polite && offerCollision;
-        if (peer.ignoreOffer) {
-            return;
-        }
-        try {
-            await pc.setRemoteDescription({ type: "offer", sdp: data.sdp });
-            await pc.setLocalDescription();
-            this._sendAnswer(senderActorId, pc.localDescription, data.sessionId);
-        }
-        catch (err) {
-            this._emit("error", err);
-        }
-    }
-    async _handleAnswer(data, meta) {
-        // Check if this answer is for us
-        if (data.targetActorId !== this.myActorId)
-            return;
-        const senderActorId = data.senderActorId;
-        if (!senderActorId)
-            return;
-        const peer = this._peers.get(senderActorId);
-        if (!peer)
-            return;
-        try {
-            await peer.pc.setRemoteDescription({ type: "answer", sdp: data.sdp });
-        }
-        catch (err) {
-            this._emit("error", err);
-        }
-    }
-    async _handleCandidate(data, meta) {
-        // Check if this candidate is for us
-        if (data.targetActorId !== this.myActorId)
-            return;
-        const senderActorId = data.senderActorId;
-        if (!senderActorId)
-            return;
-        const peer = this._peers.get(senderActorId);
-        if (!peer || peer.ignoreOffer)
-            return;
-        try {
-            await peer.pc.addIceCandidate(data.candidate);
-        }
-        catch (err) {
-            // Ignore errors if we're ignoring offers
-            if (!peer.ignoreOffer) {
-                this._emit("error", err);
-            }
-        }
-    }
-    _sendOffer(targetActorId, description) {
-        const sessionId = this._generateSessionId();
-        const message = {
-            type: "offer",
-            senderActorId: this.myActorId,
-            targetActorId,
-            sessionId,
-            sdp: description.sdp,
-        };
-        this._client.emit(`${this.topicPrefix}/webrtc:offer`, message, { echo: false });
-    }
-    _sendAnswer(targetActorId, description, sessionId) {
-        const message = {
-            type: "answer",
-            senderActorId: this.myActorId,
-            targetActorId,
-            sessionId,
-            sdp: description.sdp,
-        };
-        this._client.emit(`${this.topicPrefix}/webrtc:answer`, message, { echo: false });
-    }
-    _sendCandidate(targetActorId, candidate) {
-        const message = {
-            senderActorId: this.myActorId,
-            targetActorId,
-            candidate,
-        };
-        this._client.emit(`${this.topicPrefix}/webrtc:candidate`, message, { echo: false });
-    }
-    _addTracksToConnection(pc, stream) {
-        const existingSenders = pc.getSenders();
-        for (const track of stream.getTracks()) {
-            // Check if track is already added
-            const alreadyAdded = existingSenders.some((sender) => sender.track?.id === track.id);
-            if (!alreadyAdded) {
-                pc.addTrack(track, stream);
-            }
-        }
-    }
-    _generateSessionId() {
-        return `sess_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
-    }
-}
-
-/**
  * NoLag SDK
- * Real-time messaging for Node.js
- */
-/**
- * Create a NoLag client for Node.js
+ * Real-time messaging for React Native.
  *
- * Pass an access token string, or a TokenProvider function that returns a
- * short-lived client token (JWT) minted by your backend.
+ * React Native's WebSocket is the native one and supports
+ * `binaryType = "arraybuffer"`, so the transport is identical to the browser
+ * build. This entry point exists for two reasons.
+ *
+ * 1. Metro needs a `react-native` condition to resolve. It matches
+ *    "react-native" then "import"/"require", and does not understand the
+ *    "browser" condition at all, so without this it resolves the Node build and
+ *    tries to bundle `ws` (and with it net, tls and http).
+ *
+ * 2. The WebRTC module is deliberately excluded. `webrtc/environment.ts` does a
+ *    bare require of the Node-only wrtc package. Metro collects dependencies
+ *    statically, and `allowOptionalDependencies` defaults to false:
+ *    @expo/metro-config turns it on, but bare @react-native/metro-config does
+ *    not, so that require fails the bundle on bare React Native while working
+ *    under Expo. Rather than ship something that breaks on half the ecosystem,
+ *    WebRTC is left out. React Native needs `react-native-webrtc` regardless,
+ *    which is a separate piece of work.
+ *
+ * The core has no other React Native specific behaviour. App lifecycle and
+ * network reachability arrive through the `lifecycle` and `network` adapter
+ * options; `@nolag/react-native` wires those to AppState and NetInfo for you.
+ *
+ * Note: `@msgpack/msgpack` constructs `TextEncoder`/`TextDecoder` at module
+ * scope, so importing this on a runtime lacking those globals throws on import.
+ * `@nolag/react-native` installs a guarded polyfill; if you import this entry
+ * directly, make sure they exist.
+ */
+// NOTE: the WebRTC module is intentionally absent here. See the header.
+/**
+ * Create a NoLag client for React Native
+ *
+ * Pass an access token string, or (strongly preferred on mobile) a
+ * TokenProvider function that returns a short-lived client token (JWT) minted
+ * by your backend. Never ship a long-lived actor access token inside an app
+ * bundle: it is extractable from the IPA or APK.
  */
 const NoLag = (token, options) => {
     return new NoLag$1(createWebSocket, token, options);
 };
 
-export { NoLag, NoLagApi, NoLagApiError, NoLagEncodeError, NoLagServerError, NoLag$1 as NoLagSocket, WebRTCManager, createDocumentLifecycleAdapter, createWindowNetworkAdapter, NoLag as default };
-//# sourceMappingURL=index.mjs.map
+export { NoLag, NoLagApi, NoLagApiError, NoLagEncodeError, NoLagServerError, NoLag$1 as NoLagSocket, createDocumentLifecycleAdapter, createWindowNetworkAdapter, NoLag as default };
+//# sourceMappingURL=react-native.js.map

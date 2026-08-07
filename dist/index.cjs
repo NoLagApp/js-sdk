@@ -106,7 +106,7 @@ function utf8Encode(str, output, outputOffset) {
         utf8EncodeJs(str, output, outputOffset);
     }
 }
-const CHUNK_SIZE = 4096;
+const CHUNK_SIZE$1 = 4096;
 function utf8DecodeJs(bytes, inputOffset, byteLength) {
     let offset = inputOffset;
     const end = offset + byteLength;
@@ -145,7 +145,7 @@ function utf8DecodeJs(bytes, inputOffset, byteLength) {
         else {
             units.push(byte1);
         }
-        if (units.length >= CHUNK_SIZE) {
+        if (units.length >= CHUNK_SIZE$1) {
             result += String.fromCharCode(...units);
             units.length = 0;
         }
@@ -1724,6 +1724,176 @@ const WS_READY_STATE = {
     OPEN: 1};
 
 /**
+ * Platform adapters.
+ *
+ * The core client has no opinion about how a host reports app lifecycle or
+ * network reachability. Browsers expose `document.visibilitychange` and
+ * `window.online`/`offline`; React Native exposes `AppState` and NetInfo;
+ * Node exposes neither. Rather than sniff the environment, the client takes
+ * these as injectable adapters and falls back to the DOM implementations when
+ * they are available.
+ */
+/**
+ * Lifecycle adapter backed by the Page Visibility API.
+ * Returns null where there is no `document` (Node, React Native), leaving the
+ * client without a lifecycle signal unless one is injected.
+ */
+function createDocumentLifecycleAdapter() {
+    if (typeof document === "undefined" ||
+        typeof document.addEventListener !== "function") {
+        return null;
+    }
+    return {
+        onStateChange(handler) {
+            const listener = () => {
+                handler(document.visibilityState === "hidden" ? "background" : "active");
+            };
+            document.addEventListener("visibilitychange", listener);
+            return () => document.removeEventListener("visibilitychange", listener);
+        },
+    };
+}
+/**
+ * Network adapter backed by the browser's online/offline events.
+ * Returns null where there is no `window` (Node, React Native).
+ *
+ * Note these events only report whether the machine has *a* network, not
+ * whether it can actually reach anything. They are a useful hint for dropping
+ * reconnect backoff early, not a guarantee.
+ */
+function createWindowNetworkAdapter() {
+    if (typeof window === "undefined" ||
+        typeof window.addEventListener !== "function") {
+        return null;
+    }
+    return {
+        onReachabilityChange(handler) {
+            const onOnline = () => handler(true);
+            const onOffline = () => handler(false);
+            window.addEventListener("online", onOnline);
+            window.addEventListener("offline", onOffline);
+            return () => {
+                window.removeEventListener("online", onOnline);
+                window.removeEventListener("offline", onOffline);
+            };
+        },
+    };
+}
+
+/**
+ * Self-contained base64url and UTF-8 decoding.
+ *
+ * The JWT path deliberately avoids `atob`, `Buffer` and `TextDecoder`: none of
+ * the three is guaranteed on React Native/Hermes, and depending on them would
+ * turn a missing global into a runtime token failure on mobile.
+ */
+const BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+// Char code -> 6-bit value. -1 marks anything that is not a base64 symbol,
+// which includes padding and the whitespace some encoders insert.
+const BASE64_LOOKUP = /* @__PURE__ */ (() => {
+    const table = new Int16Array(128).fill(-1);
+    for (let i = 0; i < BASE64_ALPHABET.length; i++) {
+        table[BASE64_ALPHABET.charCodeAt(i)] = i;
+    }
+    // URL-safe aliases for + and /
+    table["-".charCodeAt(0)] = 62;
+    table["_".charCodeAt(0)] = 63;
+    return table;
+})();
+function symbolAt(input, index) {
+    const code = input.charCodeAt(index);
+    return code < 128 ? BASE64_LOOKUP[code] : -1;
+}
+/**
+ * Decode base64 or base64url into bytes. Padding is optional and any
+ * non-symbol character is skipped.
+ */
+function base64UrlToBytes(input) {
+    let symbolCount = 0;
+    for (let i = 0; i < input.length; i++) {
+        if (symbolAt(input, i) >= 0)
+            symbolCount++;
+    }
+    // Each group of 4 symbols carries 3 bytes; a trailing group of 2 or 3
+    // symbols carries 1 or 2 bytes.
+    const bytes = new Uint8Array(Math.floor((symbolCount * 3) / 4));
+    let acc = 0;
+    let accBits = 0;
+    let out = 0;
+    for (let i = 0; i < input.length; i++) {
+        const value = symbolAt(input, i);
+        if (value < 0)
+            continue;
+        acc = (acc << 6) | value;
+        accBits += 6;
+        if (accBits >= 8) {
+            accBits -= 8;
+            bytes[out++] = (acc >> accBits) & 0xff;
+        }
+    }
+    return bytes;
+}
+// String.fromCharCode is applied in chunks: spreading a large array blows the
+// call stack on every engine we care about.
+const CHUNK_SIZE = 0x1000;
+/**
+ * Decode UTF-8 bytes into a string. Malformed sequences become U+FFFD rather
+ * than throwing, matching TextDecoder's non-fatal default.
+ */
+function utf8BytesToString(bytes) {
+    const length = bytes.length;
+    const units = [];
+    let result = "";
+    let i = 0;
+    while (i < length) {
+        const byte1 = bytes[i++];
+        let codePoint;
+        if (byte1 < 0x80) {
+            codePoint = byte1;
+        }
+        else if ((byte1 & 0xe0) === 0xc0) {
+            codePoint = ((byte1 & 0x1f) << 6) | (bytes[i++] & 0x3f);
+        }
+        else if ((byte1 & 0xf0) === 0xe0) {
+            codePoint =
+                ((byte1 & 0x0f) << 12) | ((bytes[i++] & 0x3f) << 6) | (bytes[i++] & 0x3f);
+        }
+        else if ((byte1 & 0xf8) === 0xf0) {
+            codePoint =
+                ((byte1 & 0x07) << 18) |
+                    ((bytes[i++] & 0x3f) << 12) |
+                    ((bytes[i++] & 0x3f) << 6) |
+                    (bytes[i++] & 0x3f);
+        }
+        else {
+            codePoint = 0xfffd;
+        }
+        if (codePoint > 0xffff) {
+            // Outside the BMP: emit a surrogate pair.
+            const offset = codePoint - 0x10000;
+            units.push(0xd800 | (offset >> 10), 0xdc00 | (offset & 0x3ff));
+        }
+        else {
+            units.push(codePoint);
+        }
+        if (units.length >= CHUNK_SIZE) {
+            result += String.fromCharCode(...units);
+            units.length = 0;
+        }
+    }
+    if (units.length > 0) {
+        result += String.fromCharCode(...units);
+    }
+    return result;
+}
+/**
+ * Decode a base64url-encoded UTF-8 string (a JWT segment, for example).
+ */
+function base64UrlToString(input) {
+    return utf8BytesToString(base64UrlToBytes(input));
+}
+
+/**
  * NoLag Client
  * WebSocket client for Kraken Proxy with automatic reconnection
  *
@@ -1800,6 +1970,8 @@ let NoLag$1 = class NoLag {
         this._ackBatchInterval = 0; // ms (default: immediate ACKs)
         // Topic filters tracking (topic -> mixed filter array with OR strings and AND groups)
         this._topicFilters = new Map();
+        this._lifecycleUnsub = null;
+        this._networkUnsub = null;
         // Event handlers (local - for routing messages to callbacks)
         this._eventHandlers = new Map();
         this._createWebSocket = createWebSocket;
@@ -1821,17 +1993,118 @@ let NoLag$1 = class NoLag {
             projectId: options?.projectId,
         };
         this._ackBatchInterval = options?.ackBatchInterval ?? 0;
-        // Set up visibility change handler for browser
-        if (typeof document !== "undefined" && this._options.disconnectOnHidden) {
-            document.addEventListener("visibilitychange", () => {
-                if (document.visibilityState === "hidden") {
+        this._reconnectConfigured = this._options.reconnect;
+        this._setupLifecycleAdapter(options?.lifecycle);
+        this._setupNetworkAdapter(options?.network);
+    }
+    // ============ Platform Adapters ============
+    /**
+     * Wire app foreground/background transitions.
+     *
+     * Two things hang off this. `disconnectOnHidden` drops the socket while
+     * backgrounded, and every resume rechecks token freshness: JS timers are
+     * throttled or skipped outright while an app is suspended, so the scheduled
+     * refresh may never have fired and the held token can already be expired.
+     *
+     * Pass `lifecycle: null` to opt out entirely.
+     */
+    _setupLifecycleAdapter(injected) {
+        const adapter = injected === null ? null : injected ?? createDocumentLifecycleAdapter();
+        if (!adapter)
+            return;
+        this._lifecycleUnsub = adapter.onStateChange((state) => {
+            if (state === "background") {
+                if (this._options.disconnectOnHidden) {
+                    this._log("App backgrounded, disconnecting");
                     this.disconnect();
                 }
-                else if (document.visibilityState === "visible" && this._status === "disconnected") {
-                    this.connect().catch(console.error);
-                }
+                return;
+            }
+            this._log("App foregrounded");
+            if (this._status === "connected") {
+                // Survived the background: the refresh timer is the unreliable part.
+                void this._revalidateToken();
+                return;
+            }
+            if (this._options.disconnectOnHidden && this._status === "disconnected") {
+                // disconnect() cleared the runtime reconnect flag; restore the
+                // caller's configured value before resuming.
+                this._options.reconnect = this._reconnectConfigured;
+                this.connect().catch((err) => {
+                    this._log("Reconnect on foreground failed:", err);
+                });
+            }
+        });
+    }
+    /**
+     * Wire network reachability.
+     *
+     * Reconnect backoff grows to 30s, which is the wrong behaviour on a device
+     * that just moved from a dead cell to wifi. A reachability signal collapses
+     * the backoff and retries immediately.
+     *
+     * Pass `network: null` to opt out entirely.
+     */
+    _setupNetworkAdapter(injected) {
+        const adapter = injected === null ? null : injected ?? createWindowNetworkAdapter();
+        if (!adapter)
+            return;
+        this._networkUnsub = adapter.onReachabilityChange((reachable) => {
+            if (!reachable) {
+                this._log("Network unreachable");
+                return;
+            }
+            if (!this._options.reconnect)
+                return;
+            if (this._status === "connected" || this._status === "connecting")
+                return;
+            this._log("Network reachable, retrying now");
+            if (this._reconnectTimer) {
+                clearTimeout(this._reconnectTimer);
+                this._reconnectTimer = null;
+            }
+            this._reconnectAttempts = 0;
+            this._isReconnecting = true;
+            this._status = "reconnecting";
+            this.connect().catch((err) => {
+                this._log("Reconnect on network recovery failed:", err);
             });
+        });
+    }
+    /**
+     * Re-evaluate the held client token after a period where timers may not have
+     * run. Refreshes immediately if it is expired or close to it, otherwise
+     * re-arms the scheduled refresh.
+     */
+    async _revalidateToken() {
+        if (typeof this._tokenOrProvider !== "function")
+            return;
+        const exp = this._decodeJwtExp(this._options.token);
+        if (exp === null)
+            return;
+        if (exp * 1000 - Date.now() <= 30000) {
+            this._log("Token expired or expiring while backgrounded, refreshing now");
+            await this._refreshToken();
         }
+        else {
+            this._scheduleTokenRefresh();
+        }
+    }
+    /**
+     * Release everything this client owns: the socket, its timers, and the
+     * lifecycle/network subscriptions.
+     *
+     * `disconnect()` deliberately leaves the adapter subscriptions in place so a
+     * backgrounded client can come back. Call `destroy()` when the client itself
+     * is going away (React unmount, for instance) to avoid leaking listeners.
+     * Registered event handlers are left alone.
+     */
+    destroy() {
+        this.disconnect();
+        this._lifecycleUnsub?.();
+        this._lifecycleUnsub = null;
+        this._networkUnsub?.();
+        this._networkUnsub = null;
     }
     // ============ Public Properties ============
     get status() {
@@ -2417,13 +2690,7 @@ let NoLag$1 = class NoLag {
         if (parts.length !== 3)
             return null;
         try {
-            const base64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
-            const padded = base64 + "=".repeat((4 - (base64.length % 4)) % 4);
-            const binary = typeof atob === "function"
-                ? atob(padded)
-                : Buffer.from(padded, "base64").toString("latin1");
-            const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
-            const payload = JSON.parse(new TextDecoder().decode(bytes));
+            const payload = JSON.parse(base64UrlToString(parts[1]));
             return typeof payload.exp === "number" ? payload.exp : null;
         }
         catch {
@@ -4062,5 +4329,7 @@ exports.NoLagEncodeError = NoLagEncodeError;
 exports.NoLagServerError = NoLagServerError;
 exports.NoLagSocket = NoLag$1;
 exports.WebRTCManager = WebRTCManager;
+exports.createDocumentLifecycleAdapter = createDocumentLifecycleAdapter;
+exports.createWindowNetworkAdapter = createWindowNetworkAdapter;
 exports.default = NoLag;
 //# sourceMappingURL=index.cjs.map

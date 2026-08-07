@@ -39,6 +39,13 @@ import {
   TokenProvider,
 } from "./types";
 import { IUnifiedWebSocket, WebSocketFactory, WS_READY_STATE } from "./websocket/types";
+import {
+  LifecycleAdapter,
+  NetworkAdapter,
+  createDocumentLifecycleAdapter,
+  createWindowNetworkAdapter,
+} from "./adapters";
+import { base64UrlToString } from "./encoding";
 
 const DEFAULT_URL = "wss://broker.nolag.app/ws";
 /** Protocol v2: loud failures (42940 unknown_topic), published acks, auto-provisioned rooms */
@@ -61,13 +68,14 @@ type EventHandler =
   | ReplayEndHandler;
 
 // Internal options type with token included
-interface InternalOptions extends Required<Omit<NoLagOptions, 'loadBalanceGroup' | 'actorTokenId' | 'heartbeatInterval' | 'ackBatchInterval' | 'projectId'>> {
+interface InternalOptions extends Required<Omit<NoLagOptions, 'loadBalanceGroup' | 'actorTokenId' | 'heartbeatInterval' | 'ackBatchInterval' | 'projectId' | 'lifecycle' | 'network'>> {
   token: string;
   actorTokenId?: string;
   loadBalanceGroup?: string;
   maxReconnectAttempts: number;
   heartbeatInterval: number;
   projectId?: string;
+  // lifecycle/network are consumed in the constructor and never stored.
 }
 
 /**
@@ -143,6 +151,12 @@ export class NoLag {
   // Topic filters tracking (topic -> mixed filter array with OR strings and AND groups)
   private _topicFilters: Map<string, (string | string[])[]> = new Map();
 
+  // Platform adapters. `disconnect()` flips _options.reconnect off, so the
+  // caller's configured value is kept separately for lifecycle-driven resumes.
+  private _reconnectConfigured: boolean;
+  private _lifecycleUnsub: (() => void) | null = null;
+  private _networkUnsub: (() => void) | null = null;
+
   // Event handlers (local - for routing messages to callbacks)
   private _eventHandlers: Map<string, Set<EventHandler>> = new Map();
 
@@ -170,17 +184,129 @@ export class NoLag {
       projectId: options?.projectId,
     };
     this._ackBatchInterval = options?.ackBatchInterval ?? 0;
+    this._reconnectConfigured = this._options.reconnect;
 
-    // Set up visibility change handler for browser
-    if (typeof document !== "undefined" && this._options.disconnectOnHidden) {
-      document.addEventListener("visibilitychange", () => {
-        if (document.visibilityState === "hidden") {
+    this._setupLifecycleAdapter(options?.lifecycle);
+    this._setupNetworkAdapter(options?.network);
+  }
+
+  // ============ Platform Adapters ============
+
+  /**
+   * Wire app foreground/background transitions.
+   *
+   * Two things hang off this. `disconnectOnHidden` drops the socket while
+   * backgrounded, and every resume rechecks token freshness: JS timers are
+   * throttled or skipped outright while an app is suspended, so the scheduled
+   * refresh may never have fired and the held token can already be expired.
+   *
+   * Pass `lifecycle: null` to opt out entirely.
+   */
+  private _setupLifecycleAdapter(injected?: LifecycleAdapter | null): void {
+    const adapter =
+      injected === null ? null : injected ?? createDocumentLifecycleAdapter();
+    if (!adapter) return;
+
+    this._lifecycleUnsub = adapter.onStateChange((state) => {
+      if (state === "background") {
+        if (this._options.disconnectOnHidden) {
+          this._log("App backgrounded, disconnecting");
           this.disconnect();
-        } else if (document.visibilityState === "visible" && this._status === "disconnected") {
-          this.connect().catch(console.error);
         }
+        return;
+      }
+
+      this._log("App foregrounded");
+
+      if (this._status === "connected") {
+        // Survived the background: the refresh timer is the unreliable part.
+        void this._revalidateToken();
+        return;
+      }
+
+      if (this._options.disconnectOnHidden && this._status === "disconnected") {
+        // disconnect() cleared the runtime reconnect flag; restore the
+        // caller's configured value before resuming.
+        this._options.reconnect = this._reconnectConfigured;
+        this.connect().catch((err) => {
+          this._log("Reconnect on foreground failed:", err);
+        });
+      }
+    });
+  }
+
+  /**
+   * Wire network reachability.
+   *
+   * Reconnect backoff grows to 30s, which is the wrong behaviour on a device
+   * that just moved from a dead cell to wifi. A reachability signal collapses
+   * the backoff and retries immediately.
+   *
+   * Pass `network: null` to opt out entirely.
+   */
+  private _setupNetworkAdapter(injected?: NetworkAdapter | null): void {
+    const adapter =
+      injected === null ? null : injected ?? createWindowNetworkAdapter();
+    if (!adapter) return;
+
+    this._networkUnsub = adapter.onReachabilityChange((reachable) => {
+      if (!reachable) {
+        this._log("Network unreachable");
+        return;
+      }
+
+      if (!this._options.reconnect) return;
+      if (this._status === "connected" || this._status === "connecting") return;
+
+      this._log("Network reachable, retrying now");
+      if (this._reconnectTimer) {
+        clearTimeout(this._reconnectTimer);
+        this._reconnectTimer = null;
+      }
+      this._reconnectAttempts = 0;
+      this._isReconnecting = true;
+      this._status = "reconnecting";
+      this.connect().catch((err) => {
+        this._log("Reconnect on network recovery failed:", err);
       });
+    });
+  }
+
+  /**
+   * Re-evaluate the held client token after a period where timers may not have
+   * run. Refreshes immediately if it is expired or close to it, otherwise
+   * re-arms the scheduled refresh.
+   */
+  private async _revalidateToken(): Promise<void> {
+    if (typeof this._tokenOrProvider !== "function") return;
+
+    const exp = this._decodeJwtExp(this._options.token);
+    if (exp === null) return;
+
+    if (exp * 1000 - Date.now() <= 30_000) {
+      this._log("Token expired or expiring while backgrounded, refreshing now");
+      await this._refreshToken();
+    } else {
+      this._scheduleTokenRefresh();
     }
+  }
+
+  /**
+   * Release everything this client owns: the socket, its timers, and the
+   * lifecycle/network subscriptions.
+   *
+   * `disconnect()` deliberately leaves the adapter subscriptions in place so a
+   * backgrounded client can come back. Call `destroy()` when the client itself
+   * is going away (React unmount, for instance) to avoid leaking listeners.
+   * Registered event handlers are left alone.
+   */
+  destroy(): void {
+    this.disconnect();
+
+    this._lifecycleUnsub?.();
+    this._lifecycleUnsub = null;
+    this._networkUnsub?.();
+    this._networkUnsub = null;
   }
 
   // ============ Public Properties ============
@@ -878,14 +1004,7 @@ export class NoLag {
     const parts = token.split(".");
     if (parts.length !== 3) return null;
     try {
-      const base64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
-      const padded = base64 + "=".repeat((4 - (base64.length % 4)) % 4);
-      const binary =
-        typeof atob === "function"
-          ? atob(padded)
-          : Buffer.from(padded, "base64").toString("latin1");
-      const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
-      const payload = JSON.parse(new TextDecoder().decode(bytes));
+      const payload = JSON.parse(base64UrlToString(parts[1]));
       return typeof payload.exp === "number" ? payload.exp : null;
     } catch {
       return null;

@@ -66,8 +66,48 @@ export declare class NoLag {
     private _ackTimer;
     private _ackBatchInterval;
     private _topicFilters;
+    private _reconnectConfigured;
+    private _lifecycleUnsub;
+    private _networkUnsub;
     private _eventHandlers;
     constructor(createWebSocket: WebSocketFactory, token: string | TokenProvider, options?: NoLagOptions);
+    /**
+     * Wire app foreground/background transitions.
+     *
+     * Two things hang off this. `disconnectOnHidden` drops the socket while
+     * backgrounded, and every resume rechecks token freshness: JS timers are
+     * throttled or skipped outright while an app is suspended, so the scheduled
+     * refresh may never have fired and the held token can already be expired.
+     *
+     * Pass `lifecycle: null` to opt out entirely.
+     */
+    private _setupLifecycleAdapter;
+    /**
+     * Wire network reachability.
+     *
+     * Reconnect backoff grows to 30s, which is the wrong behaviour on a device
+     * that just moved from a dead cell to wifi. A reachability signal collapses
+     * the backoff and retries immediately.
+     *
+     * Pass `network: null` to opt out entirely.
+     */
+    private _setupNetworkAdapter;
+    /**
+     * Re-evaluate the held client token after a period where timers may not have
+     * run. Refreshes immediately if it is expired or close to it, otherwise
+     * re-arms the scheduled refresh.
+     */
+    private _revalidateToken;
+    /**
+     * Release everything this client owns: the socket, its timers, and the
+     * lifecycle/network subscriptions.
+     *
+     * `disconnect()` deliberately leaves the adapter subscriptions in place so a
+     * backgrounded client can come back. Call `destroy()` when the client itself
+     * is going away (React unmount, for instance) to avoid leaking listeners.
+     * Registered event handlers are left alone.
+     */
+    destroy(): void;
     get status(): ConnectionStatus;
     get connected(): boolean;
     get actorId(): string | null;

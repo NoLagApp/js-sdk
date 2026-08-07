@@ -2,6 +2,8 @@
  * NoLag SDK Types
  */
 
+import type { LifecycleAdapter, NetworkAdapter } from "./adapters";
+
 // QoS levels for MQTT
 export type QoS = 0 | 1 | 2;
 
@@ -61,6 +63,22 @@ export interface NoLagOptions {
    * This is only used for logging purposes and does not affect authorization.
    */
   projectId?: string;
+  /**
+   * App foreground/background adapter.
+   *
+   * Defaults to the Page Visibility API where `document` exists. React Native
+   * has no `document`, so pass an AppState-backed adapter (or use
+   * `@nolag/react-native`, which wires one up for you). Pass `null` to opt out.
+   */
+  lifecycle?: LifecycleAdapter | null;
+  /**
+   * Network reachability adapter, used to collapse reconnect backoff the
+   * moment connectivity returns.
+   *
+   * Defaults to `window` online/offline events where `window` exists. On React
+   * Native, pass a NetInfo-backed adapter. Pass `null` to opt out.
+   */
+  network?: NetworkAdapter | null;
 }
 
 // Connection status

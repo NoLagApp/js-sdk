@@ -8,6 +8,8 @@ export { NoLagEncodeError, NoLagServerError } from "./errors";
 export { NoLagSocket } from "./client";
 export type { QoS, NoLagOptions, TokenProvider, ConnectionStatus, ActorType, Permission, PresenceData, ActorPresence, LobbyPresenceEvent, LobbyPresenceState, NoLagEventType, MessageMeta, ReplayStartEvent, ReplayEndEvent, ReplayStartHandler, ReplayEndHandler, SubscribeOptions, EmitOptions, RestoredSubscription, ConnectHandler, DisconnectHandler, ReconnectHandler, ErrorHandler, PresenceHandler, LobbyPresenceHandler, MessageHandler, AckCallback, AppContext, RoomContext, LobbyContext, } from "./types";
 export type { WebSocketFactory, IUnifiedWebSocket } from "./websocket/types";
+export type { AppLifecycleState, LifecycleAdapter, NetworkAdapter, } from "./adapters";
+export { createDocumentLifecycleAdapter, createWindowNetworkAdapter, } from "./adapters";
 export { NoLagApi, NoLagApiError } from "./api";
 export * from "./api-types";
 export { WebRTCManager } from "./webrtc";

@@ -38,7 +38,6 @@ export default [
     ],
   },
   // Browser build (bundled, minified)
-  // Also works for React Native (uses native WebSocket)
   {
     input: "src/browser.ts",
     output: {
@@ -52,6 +51,22 @@ export default [
       resolve({ browser: true }),
       commonjs(),
       terser(),
+    ],
+  },
+  // React Native build (bundled, NOT minified)
+  // Same code as the browser build; Metro minifies release bundles itself, and
+  // shipping unminified keeps stack traces and the debugger useful.
+  {
+    input: "src/react-native.ts",
+    output: {
+      file: "dist/react-native.js",
+      format: "esm",
+      sourcemap: true,
+    },
+    plugins: [
+      typescript({ tsconfig: "./tsconfig.json" }),
+      resolve({ browser: true }),
+      commonjs(),
     ],
   },
 ];
