@@ -94,6 +94,32 @@ const client = NoLag(token, options?);
 | `qos` | `0 \| 1 \| 2` | `1` | Default QoS level |
 | `loadBalance` | `boolean` | `false` | Enable load balancing for all subscriptions |
 | `loadBalanceGroup` | `string` | - | Load balance group name |
+| `clientId` | `string` | - | Names this client instance, for actors whose sessions persist |
+
+---
+
+### Naming a client instance
+
+A broker session belongs to a client *instance*, not to a credential. This
+only matters for actor types whose sessions persist (`agent` and
+`orchestrator`): two processes sharing one of those tokens are otherwise two
+attempts at the same session, so only the first keeps a resumable one and the
+rest get clean sessions.
+
+Give each worker its own `clientId` and they each keep their own session, so a
+worker that goes away still finds its queued messages waiting when it returns.
+
+```typescript
+const client = NoLag(token, { clientId: process.env.WORKER_NAME });
+```
+
+It must be **stable across restarts** for a given worker — that is what makes a
+reconnect "the same worker coming back" rather than a new one. A pod name or a
+configured worker id is right; a random value per process is not, because the
+old session then lingers holding messages nobody will collect.
+
+Letters, digits, `-` and `_` only; anything else is stripped and the result is
+capped at 64 characters.
 
 ---
 

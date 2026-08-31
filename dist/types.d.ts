@@ -51,6 +51,28 @@ export interface NoLagOptions {
      */
     ackBatchInterval?: number;
     /**
+     * Names this client instance, for actors whose sessions persist
+     * (`agent` and `orchestrator` types).
+     *
+     * A broker session belongs to a client instance, not to a credential. Two
+     * processes sharing an actor token are, without this, two attempts at the
+     * same session: only the first keeps a resumable one and the rest get clean
+     * sessions. Give each worker its own stable id and they each keep their own
+     * session, so a worker that goes away still finds its queued messages when
+     * it returns.
+     *
+     * It must be STABLE for a given worker across restarts — that is what makes
+     * a reconnect "the same worker coming back" rather than a new one. A value
+     * derived from a pod name or a configured worker id is right; a random value
+     * per process is not, because the old session then lingers holding messages
+     * nobody will collect.
+     *
+     * Letters, digits, `-` and `_` only; anything else is stripped and the
+     * result is capped at 64 characters. Ignored for actor types whose sessions
+     * do not persist.
+     */
+    clientId?: string;
+    /**
      * Project ID for debug logging.
      * When provided, connection attempts and rejections will be logged
      * with this project ID, making them visible in the Event Logs dashboard.

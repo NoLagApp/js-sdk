@@ -68,13 +68,14 @@ type EventHandler =
   | ReplayEndHandler;
 
 // Internal options type with token included
-interface InternalOptions extends Required<Omit<NoLagOptions, 'loadBalanceGroup' | 'actorTokenId' | 'heartbeatInterval' | 'ackBatchInterval' | 'projectId' | 'lifecycle' | 'network'>> {
+interface InternalOptions extends Required<Omit<NoLagOptions, 'loadBalanceGroup' | 'actorTokenId' | 'heartbeatInterval' | 'ackBatchInterval' | 'projectId' | 'clientId' | 'lifecycle' | 'network'>> {
   token: string;
   actorTokenId?: string;
   loadBalanceGroup?: string;
   maxReconnectAttempts: number;
   heartbeatInterval: number;
   projectId?: string;
+  clientId?: string;
   // lifecycle/network are consumed in the constructor and never stored.
 }
 
@@ -182,6 +183,7 @@ export class NoLag {
       loadBalanceGroup: options?.loadBalanceGroup,
       heartbeatInterval: options?.heartbeatInterval ?? DEFAULT_HEARTBEAT_INTERVAL,
       projectId: options?.projectId,
+      clientId: options?.clientId,
     };
     this._ackBatchInterval = options?.ackBatchInterval ?? 0;
     this._reconnectConfigured = this._options.reconnect;
@@ -973,11 +975,17 @@ export class NoLag {
 
           // Only include reconnect flag when true (reconnecting after disconnect)
           // Absence of reconnect flag = fresh connect (no subscription restoration)
-          const authMessage: { type: string; token: string; reconnect?: boolean; projectId?: string; protocolVersion: number } = {
+          const authMessage: { type: string; token: string; reconnect?: boolean; projectId?: string; clientId?: string; protocolVersion: number } = {
             type: "auth",
             token,
             protocolVersion: PROTOCOL_VERSION,
           };
+          // Names this client instance so the broker keeps a session per
+          // worker rather than per credential. Sent on every connect and
+          // reconnect: it is what identifies the returning worker.
+          if (this._options.clientId) {
+            authMessage.clientId = this._options.clientId;
+          }
           if (this._isReconnecting) {
             authMessage.reconnect = true;
           }
