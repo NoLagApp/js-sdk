@@ -189,14 +189,17 @@ export interface EmitOptions {
     /** Retain message on broker (default: false) */
     retain?: boolean;
     /**
-     * Whether to receive this message back if subscribed to the same topic.
-     * (default: true - you will receive your own messages)
+     * Per-connection echo flag passed to the broker (default: true). Note that
+     * the publishing ACTOR never receives its own message regardless of this
+     * flag: the broker drops it before delivery. Setting it to false only adds a
+     * per-connection drop for the rare case of two connections on one actor.
      */
     echo?: boolean;
     /**
      * Filter value for this publish.
-     * Routes the message to subscribers with this specific filter.
-     * Subscribers without filters (wildcard) will NOT receive filtered publishes.
+     * Routes the message to subscribers whose filter list includes this value.
+     * Subscribers with NO filters are wildcard subscribers and also receive it;
+     * filters are routing, not a privacy boundary.
      * Must not contain '/', '#', '+', or '|'.
      */
     filter?: string;
