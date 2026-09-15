@@ -143,6 +143,10 @@ export interface ActorCreate {
     description?: string;
     externalId?: string;
     metadata?: Record<string, unknown>;
+    /** ISO 8601 expiry; the actor stops authenticating after it. */
+    expiresAt?: string;
+    /** Bind the actor to an access scope at creation. Must belong to the same project. */
+    accessScopeId?: string;
 }
 export interface ActorUpdate {
     name?: string;
