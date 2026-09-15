@@ -2,6 +2,7 @@
  * NoLag SDK Types
  */
 import type { LifecycleAdapter, NetworkAdapter } from "./adapters";
+import type { NoLagEncodeError, NoLagServerError } from "./errors";
 export type QoS = 0 | 1 | 2;
 /**
  * Async token provider for client tokens (short-lived JWTs minted by your
@@ -97,7 +98,7 @@ export interface NoLagOptions {
     network?: NetworkAdapter | null;
 }
 export type ConnectionStatus = "disconnected" | "connecting" | "connected" | "reconnecting";
-export type ActorType = "device" | "user" | "server" | "service" | "session" | "agent" | "orchestrator" | "observer";
+export type ActorType = "device" | "user" | "service" | "session" | "agent" | "orchestrator" | "observer";
 export type Permission = "subscribe" | "publish" | "pubSub";
 export type PresenceStatus = "online" | "offline" | "waking";
 export interface WakeConfig {
@@ -124,7 +125,7 @@ export interface LobbyPresenceEvent {
     data: PresenceData;
 }
 export type LobbyPresenceState = Record<string, Record<string, PresenceData>>;
-export type NoLagEventType = "connect" | "disconnect" | "reconnect" | "error" | "presence:join" | "presence:leave" | "presence:update" | "replay:start" | "replay:end";
+export type NoLagEventType = "connect" | "disconnect" | "reconnect" | "error" | "presence:join" | "presence:leave" | "presence:update" | "replay:start" | "replay:end" | "hydration";
 export interface MessageMeta {
     from?: string;
     timestamp?: number;
@@ -145,6 +146,16 @@ export interface ReplayEndEvent {
 }
 export type ReplayStartHandler = (event: ReplayStartEvent) => void;
 export type ReplayEndHandler = (event: ReplayEndEvent) => void;
+/**
+ * Delivered once per subscribe when the app has a hydration webhook: the
+ * broker calls the webhook and forwards its JSON body here. `topic` is the
+ * bare topic name (for example `messages`), not the room-qualified pattern.
+ */
+export interface HydrationEvent {
+    topic: string;
+    data: unknown;
+}
+export type HydrationHandler = (event: HydrationEvent) => void;
 export interface SubscribeOptions {
     /** QoS level for this subscription */
     qos?: QoS;
@@ -210,10 +221,15 @@ export interface RestoredSubscription {
 export type ConnectHandler = () => void;
 export type DisconnectHandler = (reason: string) => void;
 export type ReconnectHandler = () => void;
-export type ErrorHandler = (error: Error) => void;
+/**
+ * Broker-originated failures arrive as `NoLagServerError` (with `code`,
+ * `hint`, `topic`); encode failures as `NoLagEncodeError`; transport
+ * failures as a plain `Error`. Narrow with `instanceof`.
+ */
+export type ErrorHandler = (error: NoLagServerError | NoLagEncodeError | Error) => void;
 export type PresenceHandler = (actor: ActorPresence) => void;
 export type LobbyPresenceHandler = (event: LobbyPresenceEvent) => void;
-export type MessageHandler = (data: unknown, meta: MessageMeta) => void;
+export type MessageHandler<T = unknown> = (data: T, meta: MessageMeta) => void;
 export type AckCallback = (error: Error | null) => void;
 export interface AppContext {
     /** Set the room within this app */
@@ -233,9 +249,9 @@ export interface RoomContext {
     emit(topic: string, data: unknown, callback?: AckCallback): void;
     emit(topic: string, data: unknown, options: EmitOptions, callback?: AckCallback): void;
     /** Listen for messages on a topic in this room */
-    on(topic: string, handler: MessageHandler): RoomContext;
+    on<T = unknown>(topic: string, handler: MessageHandler<T>): RoomContext;
     /** Remove message handler for a topic in this room */
-    off(topic: string, handler?: MessageHandler): RoomContext;
+    off<T = unknown>(topic: string, handler?: MessageHandler<T>): RoomContext;
     /** Replace all filters for a topic in this room */
     setFilters(topic: string, filters: string[], callback?: AckCallback): void;
     /** Add filters to existing filters for a topic in this room */

@@ -36,6 +36,7 @@ import {
   ReplayEndEvent,
   ReplayStartHandler,
   ReplayEndHandler,
+  HydrationHandler,
   TokenProvider,
 } from "./types";
 import { IUnifiedWebSocket, WebSocketFactory, WS_READY_STATE } from "./websocket/types";
@@ -65,7 +66,8 @@ type EventHandler =
   | LobbyPresenceHandler
   | MessageHandler
   | ReplayStartHandler
-  | ReplayEndHandler;
+  | ReplayEndHandler
+  | HydrationHandler;
 
 // Internal options type with token included
 interface InternalOptions extends Required<Omit<NoLagOptions, 'loadBalanceGroup' | 'actorTokenId' | 'heartbeatInterval' | 'ackBatchInterval' | 'projectId' | 'clientId' | 'lifecycle' | 'network'>> {
@@ -827,13 +829,16 @@ export class NoLag {
 
     this._log("Emitting to:", topic, data);
 
-    const publishMessage: { type: string; topic: string; data: unknown; qos: QoS; echo: boolean; filter?: string; filters?: string[]; msgRef?: string } = {
+    const publishMessage: { type: string; topic: string; data: unknown; qos: QoS; echo: boolean; retain?: boolean; filter?: string; filters?: string[]; msgRef?: string } = {
       type: "publish",
       topic,
       data,
       qos: options.qos ?? this._options.qos,
       echo: options.echo ?? true,
     };
+    if (options.retain) {
+      publishMessage.retain = true;
+    }
     if (options.filter) {
       publishMessage.filter = options.filter;
     } else if (options.filters && options.filters.length > 0) {
@@ -882,7 +887,10 @@ export class NoLag {
   on(event: "presence:join", handler: PresenceHandler): this;
   on(event: "presence:leave", handler: PresenceHandler): this;
   on(event: "presence:update", handler: PresenceHandler): this;
-  on(event: string, handler: MessageHandler): this;
+  on(event: "replay:start", handler: ReplayStartHandler): this;
+  on(event: "replay:end", handler: ReplayEndHandler): this;
+  on(event: "hydration", handler: HydrationHandler): this;
+  on<T = unknown>(event: string, handler: MessageHandler<T>): this;
   on(event: string, handler: EventHandler): this {
     if (!this._eventHandlers.has(event)) {
       this._eventHandlers.set(event, new Set());
@@ -906,7 +914,7 @@ export class NoLag {
   /**
    * Listen to all topic messages
    */
-  onAny(handler: (topic: string, data: unknown, meta: MessageMeta) => void): this {
+  onAny<T = unknown>(handler: (topic: string, data: T, meta: MessageMeta) => void): this {
     this.on("*", handler as EventHandler);
     return this;
   }
@@ -1251,6 +1259,10 @@ export class NoLag {
         this._handleReplayEnd(message);
         break;
 
+      case "hydration":
+        this._handleHydration(message);
+        break;
+
       case "error": {
         this._log("Server error:", message.error, message.topic ?? "", message.hint ?? "");
         const serverError = new NoLagServerError({
@@ -1323,6 +1335,16 @@ export class NoLag {
       oldestTimestamp: message.oldestTimestamp,
       newestTimestamp: message.newestTimestamp,
     });
+  }
+
+  /**
+   * The broker forwards the hydration webhook's response body once per
+   * subscribe. Surfaced as its own event rather than through the topic
+   * handlers so a consumer can tell "state on join" from live traffic.
+   */
+  private _handleHydration(message: { topic: string; data: unknown }): void {
+    this._log("Hydration for:", message.topic);
+    this._emitEvent("hydration", { topic: message.topic, data: message.data });
   }
 
   private _handleReplayEnd(message: { replayed: number }): void {
@@ -1584,12 +1606,12 @@ class Room implements RoomContext {
     }
   }
 
-  on(topic: string, handler: MessageHandler): this {
+  on<T = unknown>(topic: string, handler: MessageHandler<T>): this {
     this._client.on(this._fullTopic(topic), handler);
     return this;
   }
 
-  off(topic: string, handler?: MessageHandler): this {
+  off<T = unknown>(topic: string, handler?: MessageHandler<T>): this {
     this._client.off(this._fullTopic(topic), handler as EventHandler);
     return this;
   }

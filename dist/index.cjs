@@ -2542,6 +2542,9 @@ let NoLag$1 = class NoLag {
             qos: options.qos ?? this._options.qos,
             echo: options.echo ?? true,
         };
+        if (options.retain) {
+            publishMessage.retain = true;
+        }
         if (options.filter) {
             publishMessage.filter = options.filter;
         }
@@ -2909,6 +2912,9 @@ let NoLag$1 = class NoLag {
             case "replayEnd":
                 this._handleReplayEnd(message);
                 break;
+            case "hydration":
+                this._handleHydration(message);
+                break;
             case "error": {
                 this._log("Server error:", message.error, message.topic ?? "", message.hint ?? "");
                 const serverError = new NoLagServerError({
@@ -2974,6 +2980,15 @@ let NoLag$1 = class NoLag {
             oldestTimestamp: message.oldestTimestamp,
             newestTimestamp: message.newestTimestamp,
         });
+    }
+    /**
+     * The broker forwards the hydration webhook's response body once per
+     * subscribe. Surfaced as its own event rather than through the topic
+     * handlers so a consumer can tell "state on join" from live traffic.
+     */
+    _handleHydration(message) {
+        this._log("Hydration for:", message.topic);
+        this._emitEvent("hydration", { topic: message.topic, data: message.data });
     }
     _handleReplayEnd(message) {
         this._isReplaying = false;

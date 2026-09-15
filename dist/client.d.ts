@@ -5,9 +5,9 @@
  * Subscriptions are persisted server-side - no local tracking needed.
  * On reconnect, the server automatically restores all subscriptions.
  */
-import { NoLagOptions, ConnectionStatus, ActorType, PresenceData, ActorPresence, MessageMeta, EmitOptions, SubscribeOptions, ConnectHandler, DisconnectHandler, ReconnectHandler, ErrorHandler, PresenceHandler, LobbyPresenceHandler, MessageHandler, AckCallback, AppContext, ReplayStartHandler, ReplayEndHandler, TokenProvider } from "./types";
+import { NoLagOptions, ConnectionStatus, ActorType, PresenceData, ActorPresence, MessageMeta, EmitOptions, SubscribeOptions, ConnectHandler, DisconnectHandler, ReconnectHandler, ErrorHandler, PresenceHandler, LobbyPresenceHandler, MessageHandler, AckCallback, AppContext, ReplayStartHandler, ReplayEndHandler, HydrationHandler, TokenProvider } from "./types";
 import { WebSocketFactory } from "./websocket/types";
-type EventHandler = ConnectHandler | DisconnectHandler | ReconnectHandler | ErrorHandler | PresenceHandler | LobbyPresenceHandler | MessageHandler | ReplayStartHandler | ReplayEndHandler;
+type EventHandler = ConnectHandler | DisconnectHandler | ReconnectHandler | ErrorHandler | PresenceHandler | LobbyPresenceHandler | MessageHandler | ReplayStartHandler | ReplayEndHandler | HydrationHandler;
 /**
  * NoLag Client
  *
@@ -219,7 +219,10 @@ export declare class NoLag {
     on(event: "presence:join", handler: PresenceHandler): this;
     on(event: "presence:leave", handler: PresenceHandler): this;
     on(event: "presence:update", handler: PresenceHandler): this;
-    on(event: string, handler: MessageHandler): this;
+    on(event: "replay:start", handler: ReplayStartHandler): this;
+    on(event: "replay:end", handler: ReplayEndHandler): this;
+    on(event: "hydration", handler: HydrationHandler): this;
+    on<T = unknown>(event: string, handler: MessageHandler<T>): this;
     /**
      * Remove event handler
      */
@@ -227,7 +230,7 @@ export declare class NoLag {
     /**
      * Listen to all topic messages
      */
-    onAny(handler: (topic: string, data: unknown, meta: MessageMeta) => void): this;
+    onAny<T = unknown>(handler: (topic: string, data: T, meta: MessageMeta) => void): this;
     /**
      * Set the app context for scoped pub/sub
      *
@@ -279,6 +282,12 @@ export declare class NoLag {
     private _handleMessage;
     private _handleTopicMessage;
     private _handleReplayStart;
+    /**
+     * The broker forwards the hydration webhook's response body once per
+     * subscribe. Surfaced as its own event rather than through the topic
+     * handlers so a consumer can tell "state on join" from live traffic.
+     */
+    private _handleHydration;
     private _handleReplayEnd;
     private _queueAck;
     private _flushAcks;

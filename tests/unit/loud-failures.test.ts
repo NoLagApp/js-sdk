@@ -235,7 +235,9 @@ describe("structured server errors", () => {
     const { client, getWs } = makeClient();
     await connect(client, getWs);
     const errors: NoLagServerError[] = [];
-    client.on("error", (e: any) => errors.push(e));
+    client.on("error", (e) => {
+      if (e instanceof NoLagServerError) errors.push(e);
+    });
 
     getWs().receive({ type: "error", code: 42910, error: "rate_limit_exceeded", topic: "room/topic" });
     await new Promise((r) => setTimeout(r, 0));
@@ -243,5 +245,33 @@ describe("structured server errors", () => {
     expect(errors[0]).toBeInstanceOf(NoLagServerError);
     expect(errors[0].code).toBe(42910);
     expect(errors[0].message).toContain("rate_limit_exceeded");
+  });
+});
+
+describe("hydration frames", () => {
+  it("surfaces the broker's hydration frame as a hydration event", async () => {
+    const { client, getWs } = makeClient();
+    await connect(client, getWs);
+    const seen: Array<{ topic: string; data: unknown }> = [];
+    client.on("hydration", (e) => seen.push(e));
+
+    getWs().receive({ type: "hydration", topic: "messages", data: { items: [1, 2] } });
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(seen).toEqual([{ topic: "messages", data: { items: [1, 2] } }]);
+  });
+});
+
+describe("publish options on the wire", () => {
+  it("sends retain when asked (it was silently dropped before 1.14.0)", async () => {
+    const { client, getWs } = makeClient();
+    await connect(client, getWs);
+
+    client.emit("app/room/state", { v: 1 }, { retain: true });
+    client.emit("app/room/state", { v: 2 });
+
+    const publishes = getWs().sent.filter((m) => m.type === "publish");
+    expect(publishes[0].retain).toBe(true);
+    expect(publishes[1].retain).toBeUndefined();
   });
 });

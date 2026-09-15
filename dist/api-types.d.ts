@@ -5,12 +5,18 @@
  * API keys are scoped to a specific project, so organization and project IDs
  * are implicit and not needed in API calls.
  */
+/**
+ * Shape of every paginated list from the control plane. This is the wire
+ * shape the backend actually returns; the previous flat `total/page/limit/
+ * totalPages` fields were never populated.
+ */
 export interface PaginatedResult<T> {
     data: T[];
-    total: number;
-    page: number;
-    limit: number;
-    totalPages: number;
+    pagination: {
+        total: number;
+        page: number;
+        pageCount: number;
+    };
 }
 export interface ApiError {
     statusCode: number;
@@ -109,7 +115,11 @@ export interface RoomActorAccessCreate {
     role?: string;
     metadata?: Record<string, unknown>;
 }
-export type ActorTokenType = "device" | "user" | "server";
+/**
+ * Actor types the control plane accepts. Only `agent` and `orchestrator`
+ * hold a persistent broker session.
+ */
+export type ActorTokenType = "device" | "user" | "service" | "session" | "agent" | "orchestrator" | "observer";
 export interface Actor {
     actorTokenId: string;
     projectId: string;

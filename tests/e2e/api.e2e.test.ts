@@ -415,8 +415,9 @@ describe.skipIf(!hasValidApiKey)("NoLag API Client E2E", () => {
 
       expect(result.data).toBeInstanceOf(Array);
       expect(result.data.length).toBeLessThanOrEqual(5);
-      expect(result.page).toBeDefined();
-      expect(result.limit).toBeDefined();
+      expect(result.pagination.page).toBe(1);
+      expect(typeof result.pagination.total).toBe("number");
+      expect(typeof result.pagination.pageCount).toBe("number");
     });
   });
 });

@@ -28,6 +28,8 @@ export type {
   ReplayEndEvent,
   ReplayStartHandler,
   ReplayEndHandler,
+  HydrationEvent,
+  HydrationHandler,
   SubscribeOptions,
   EmitOptions,
   RestoredSubscription,
