@@ -31,22 +31,48 @@ export interface App {
     description?: string;
     blueprintId?: string;
     config?: Record<string, unknown>;
+    topics?: string[];
+    topicConfigs?: TopicConfigs;
+    hydrationWebhook?: WebhookConfig;
+    triggerWebhook?: WebhookConfig;
     createdAt: string;
     updatedAt: string;
     deletedAt?: string;
 }
+/** A webhook target as stored on an app. */
+export interface WebhookConfig {
+    url: string;
+    headers?: Record<string, string>;
+}
+/** Per-topic configuration; see the control-plane docs for the full shape. */
+export type TopicConfigs = Record<string, Record<string, unknown>>;
 export interface AppCreate {
     name: string;
     slug?: string;
     description?: string;
     blueprintId?: string;
+    /** Pin a blueprint version; defaults to latest. */
+    blueprintVersion?: string;
     config?: Record<string, unknown>;
+    /**
+     * Topic names actors may address in this app's rooms. An app created
+     * without topics (and without a blueprint that supplies them) refuses
+     * every subscribe with unknown_topic.
+     */
+    topics?: string[];
+    topicConfigs?: TopicConfigs;
+    hydrationWebhook?: WebhookConfig;
+    triggerWebhook?: WebhookConfig;
 }
 export interface AppUpdate {
     name?: string;
     slug?: string;
     description?: string;
     config?: Record<string, unknown>;
+    topics?: string[];
+    topicConfigs?: TopicConfigs;
+    hydrationWebhook?: WebhookConfig;
+    triggerWebhook?: WebhookConfig;
 }
 export type RoomType = "static" | "dynamic";
 export interface Room {
